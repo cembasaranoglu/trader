@@ -30,4 +30,5 @@ Değişmezler (kod ve testlerle zorlanır):
 
 - LLM'in katkısı ayrı ayrı ölçülebilir, çünkü her rol konfigürasyonla kapatılabilir ve kapalıyken deterministik bir varsayılan devreye girer.
 - Tek Go modülü (`github.com/cembasaranoglu/trader`); çalıştırılabilir dosyalar `cmd/` altında, uygulama `internal/` altında. `pkg/` yok, çünkü dışarıya açılan kararlı bir API yok.
-- **Assumption:** Go 1.24.7, geliştirme ortamında doğrulanabilen sürüm olduğu için seçildi. Daha yeni bir sürüme geçmek `go.mod` güncellemesi ve CI'ın yeşil kalmasıyla yapılır.
+- Go sürümü `go.mod` ile sabittir: `go 1.26.0`, `toolchain go1.26.11` (2026-11-19'da 1.24.7'den yükseltildi; 1.24 desteği bitti, Anthropic Go SDK v2 en az 1.25, modernc SQLite v1.62 en az 1.26 istiyor). Yükseltme `go.mod` güncellemesi ve CI'ın yeşil kalmasıyla yapılır.
+- Öğrenme düzleminde backtest ve A5 çağrısının Go'ya taşınması önerisi (plan v2, `docs/plan/01-waves.md` U-15) onaylanırsa bu ADR güncellenir; onaylanana kadar katman 4 tanımı geçerlidir.

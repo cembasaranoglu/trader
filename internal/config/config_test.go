@@ -121,6 +121,8 @@ func TestLoadRejects(t *testing.T) {
 		{"missing bool is not treated as false", func(t *testing.T, m map[string]any) { del(t, m, "agents.critic.enabled") }, config.ErrMissing, "agents.critic.enabled"},
 		{"missing window", func(t *testing.T, m map[string]any) { del(t, m, "risk.max_entries_per_window.window") }, config.ErrMissing, "risk.max_entries_per_window.window"},
 		{"unknown mode", func(t *testing.T, m map[string]any) { set(t, m, "mode", "live") }, config.ErrInvalid, "mode"},
+		{"live_small not yet supported", func(t *testing.T, m map[string]any) { set(t, m, "mode", "live_small") }, config.ErrInvalid, "mode"},
+		{"live_full not yet supported", func(t *testing.T, m map[string]any) { set(t, m, "mode", "live_full") }, config.ErrInvalid, "mode"},
 		{"unsupported venue", func(t *testing.T, m map[string]any) { set(t, m, "venue.primary", "kraken") }, config.ErrInvalid, "venue.primary"},
 		{"secondary venue before W9", func(t *testing.T, m map[string]any) { set(t, m, "venue.secondary_enabled", true) }, config.ErrInvalid, "venue.secondary_enabled"},
 		{"unsupported quote", func(t *testing.T, m map[string]any) { set(t, m, "quote_currency", "EUR") }, config.ErrInvalid, "quote_currency"},

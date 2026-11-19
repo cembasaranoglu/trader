@@ -399,6 +399,10 @@ func (c *checker) crossChecks(r *rawConfig) {
 	if cp := r.Capital; cp != nil && finite(cp.PlannedUSD) && finite(cp.LiveSmallMaxUSD) && *cp.LiveSmallMaxUSD > *cp.PlannedUSD {
 		c.invalid("capital.live_small_max_usd", "must be <= capital.planned_usd")
 	}
+	if r.Mode != nil && (*r.Mode == string(ModeLiveSmall) || *r.Mode == string(ModeLiveFull)) {
+		// Live trading is not implemented; it is enabled in W8 after gate G1 (ADR-004).
+		c.invalid("mode", "%s is not supported yet; only paper", *r.Mode)
+	}
 	if v := r.Venue; v != nil && v.SecondaryEnabled != nil && bool(*v.SecondaryEnabled) {
 		// The BtcTurk adapter is not implemented; enabling it is a configuration error.
 		c.invalid("venue.secondary_enabled", "secondary venue is not supported yet")

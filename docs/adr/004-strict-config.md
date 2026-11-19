@@ -17,7 +17,7 @@ Risk limitleri kişisel kararlardır. Yanlış yazılmış bir anahtarın sessiz
 - Çözümleme hata mesajlarında ters tırnak içindeki değerler maskelenir; yanlış yere yazılmış bir sır hata çıktısına düşmez.
 - Doğrulama tek yerde yapılır (`internal/config`). `configs/schema.json` editör desteği içindir ve `scripts/gen_schema.py` ile örnek dosyadan üretilir; CI şemanın güncel olduğunu ve şema ile örneğin aynı anahtarları tanımladığını kontrol eder.
 - Süreler birimleriyle yazılır (`60m`); birimsiz sayı reddedilir.
-- Uygulanmamış bir yeteneği açan değerler reddedilir: `venue.secondary_enabled: true` (BtcTurk adaptörü yok) ve `venue.primary: binance_tr` (ticaret katmanı yalnız binance.com için yazılıyor, ADR-005).
+- Uygulanmamış bir yeteneği açan değerler reddedilir: `venue.secondary_enabled: true` (BtcTurk adaptörü yok) ve `venue.primary: binance_tr` (ticaret katmanı yalnız binance.com için yazılıyor, ADR-005) ve `mode: live_small` / `live_full` (canlı işlem W8'de, G1 kapısından sonra açılır).
 
 ## Sonuçlar
 

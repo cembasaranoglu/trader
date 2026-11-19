@@ -1,6 +1,6 @@
 # Uygulama planı v2
 
-Bu klasör kalan tüm işlerin kodlanabilir spesifikasyonudur. Kararlar ve gerekçeler [plan dokümanında](https://claude.ai/artifact/7Rgd1jjuXpecY2bMzy1NAH) (D-1..D-17) ve `docs/adr/` altındadır. Bu dosyalar o kararları uygulanabilir işlere çevirir; yeni karar içermez. Yeni bir karar gerekiyorsa ilgili dalgada **decision needed** olarak işaretlidir.
+Bu klasör kalan tüm işlerin kodlanabilir spesifikasyonudur. Kararlar ve gerekçeler [plan dokümanında](https://claude.ai/artifact/7Rgd1jjuXpecY2bMzy1NAH) (D-1..D-17) ve `docs/adr/` altındadır. Bu dosyalar o kararları uygulanabilir işlere çevirir. Planın gerektirdiği yeni kararlar ve önerilerim `01-waves.md` §4'te (U-1..U-22) **decision needed** olarak listelidir; onaylanmadan ilgili dalga başlamaz.
 
 Etiketler: **fact** (kaynaklı ya da ölçülmüş), **decision** (kullanıcı kararı), **recommendation** (onay bekler), **unknown**, **blocker**.
 
