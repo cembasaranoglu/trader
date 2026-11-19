@@ -66,7 +66,7 @@ go test -race ./...
    (Adres AWS'nin "Download an SSL/TLS certificate" sayfasındaki tüm bölgeler paketidir; indirmeden önce o sayfayla karşılaştırın.)
 4. Roller ve veritabanı (VPS'ten, geçici bir psql konteyneriyle; ana parolayı istemde yazın, hiçbir dosyaya kaydetmeyin). Ana kullanıcı yalnız bu kurulumda kullanılır; VPS'te ana parola **saklanmaz**. Sahip rol (`trader_owner`) yalnız bu veritabanının sahibidir, rol oluşturamaz:
    ```sh
-   docker run --rm -it -v /opt/trader/secrets/app/rds-ca.pem:/ca.pem:ro postgres:16-alpine \
+   docker run --rm -it -v /opt/trader/secrets/app/rds-ca.pem:/ca.pem:ro postgres:16-alpine@sha256:1d5b02d3a9941fbd52437db4107f8c52d6297dac553ca1e5c299ebb3756b4857 \
      psql "host=<UÇ NOKTA> port=5432 user=<ANA KULLANICI> dbname=postgres sslmode=verify-full sslrootcert=/ca.pem"
    ```
    ```sql

@@ -15,7 +15,7 @@ jobs:
     services:
       postgres:
         # Same major version as production (Lightsail managed PostgreSQL 16).
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:1d5b02d3a9941fbd52437db4107f8c52d6297dac553ca1e5c299ebb3756b4857
         env:
           POSTGRES_PASSWORD: ci-only
         ports: ["5432:5432"]
@@ -79,6 +79,17 @@ jobs:
           for i in golang:1.26.11-bookworm gcr.io/distroless/static-debian12:nonroot postgres:16-alpine; do
             docker pull --quiet "$i" >/dev/null
             echo "$i -> $(docker image inspect --format '{{index .RepoDigests 0}}' "$i")"
+          done
+      - name: pinned base images are multi-platform indexes
+        run: |
+          for ref in \
+            "$(sed -n 's/^ARG GO_IMAGE=//p' Dockerfile)" \
+            "$(sed -n 's/^ARG RUNTIME_IMAGE=//p' Dockerfile)" \
+            "$(sed -n 's/^    image: \(postgres:.*\)$/\1/p' compose.yaml)"; do
+            test -n "$ref"
+            mt="$(docker buildx imagetools inspect --raw "$ref" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("mediaType",""))')"
+            echo "$ref -> $mt"
+            case "$mt" in *manifest.list*|*image.index*) ;; *) echo "not a multi-platform index"; exit 1 ;; esac
           done
       - name: local stack (postgres, migrate, verify)
         run: |
