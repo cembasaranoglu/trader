@@ -15,13 +15,34 @@ Karar D-17 (2026-11-19) ile birincil borsa binance.com oldu. Bu dosya, adaptör�
 
 Kullanıcının binance.com arayüzünde gördüğü kural: "Spot & Margin & Stock Trading" yetkisi ancak IP erişim kısıtlaması uygulandıktan sonra açılabiliyor.
 
-## `venuecheck` ile ölçülecekler
+## Canlı ölçüm (venuecheck, 2026-11-19 07:20 UTC, kimlik bilgisi olmadan)
 
-- Saat farkı ve gidiş-dönüş süresi.
-- USDT paritelerinin sayısı ve 24 saatlik hacme göre ilk 20 (coin evreni kararı D-4 için).
-- BTCUSDT ve ETHUSDT için tick, step, minimum notional, OCO, STP modları, en iyi fiyat farkı.
-- Rate limit başlıklarının adları ve değerleri.
-- Anahtar verilirse: hesap bayrakları, ücret oranları ve anahtar yetkileri (uyarılarla).
+Tek bir ölçümdür; hacim sıralaması, spread ve gecikme ana göre değişir.
+
+| Konu | Ölçülen |
+| --- | --- |
+| Saat farkı | Medyan +54 ms; en yüksek gidiş-dönüş 1419 ms (tek örnek; diğerleri daha düşük) |
+| Semboller | 3750 sembol; 782 USDT paritesi, bunların 525'i spot işleme açık |
+| BTCUSDT | Tick 0,01, step 0,00001, **min notional 5 USDT** (market emirlerine de uygulanıyor), OCO açık |
+| ETHUSDT | Tick 0,01, step 0,0001, **min notional 5 USDT** (market emirlerine de uygulanıyor), OCO açık |
+| Emir tipleri | LIMIT, LIMIT_MAKER, MARKET, STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT |
+| STP | Varsayılan EXPIRE_MAKER; EXPIRE_TAKER izinli |
+| En iyi fiyat farkı | BTCUSDT 0,0016 bps, ETHUSDT 0,055 bps (yalnız en iyi seviye) |
+| Rate limit | Ölçüm sonunda `x-mbx-used-weight-1m` = 119 (exchangeInfo ve 24h ticker en ağır istekler) |
+
+24 saatlik USDT hacim sıralamasının ilk 20'si kripto olmayan varlıklar da içeriyor:
+
+| Grup | Semboller (ilk 20 içinde) |
+| --- | --- |
+| Kripto | BTC, ETH, SOL, ZEC, XRP, NEAR, BNB, MMT, HYPE, TRX, DOGE, ENA |
+| Stablecoin | USDC, USD1, RLUSD |
+| Tokenize hisse/ETF (assumption: "…B" ekli semboller) | NVDAB, SOXLB, CRCLB |
+| Altın token | XAUT, PAXG |
+
+Sonuçlar:
+
+- 40 USD emir tavanı (D-16), 5 USDT minimum emir tutarının çok üstünde.
+- Coin evreni (D-4) yalnız hacimle seçilemez: D-1 "kripto" kararı gereği stablecoin, tokenize hisse/ETF ve emtia tokenları dışlanmalı. Bu sembolleri API'nin ayırt edip etmediği **unknown**; W2'de evren seçici açık bir dışlama listesiyle başlar.
 
 ## Bilinmeyenler
 
