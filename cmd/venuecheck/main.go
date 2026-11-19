@@ -39,9 +39,14 @@ type venueDefaults struct {
 	symbols string
 }
 
-var defaults = map[string]venueDefaults{
-	"binance":    {quote: "USDT", symbols: "BTCUSDT,ETHUSDT"},
-	"binance_tr": {quote: "TRY", symbols: "BTC_TRY,ETH_TRY"},
+func defaultsFor(venue string) (venueDefaults, bool) {
+	switch venue {
+	case "binance":
+		return venueDefaults{quote: "USDT", symbols: "BTCUSDT,ETHUSDT"}, true
+	case "binance_tr":
+		return venueDefaults{quote: "TRY", symbols: "BTC_TRY,ETH_TRY"}, true
+	}
+	return venueDefaults{}, false
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -58,7 +63,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	d, ok := defaults[*venueName]
+	d, ok := defaultsFor(*venueName)
 	if !ok || fs.NArg() != 0 || *samples < 1 || *samples > 20 || *topN < 0 || *topN > 100 {
 		fmt.Fprintln(stderr, "usage: venuecheck [-venue binance|binance_tr] [-symbols A,B] [-credentials file] [-out file] [-samples 1..20] [-top 0..100]")
 		return 2
@@ -81,6 +86,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		creds = c
+		for _, warn := range c.Warnings {
+			fmt.Fprintln(stderr, "WARNING:", warn)
+		}
 	}
 	v, err := newVenue(*venueName, *baseURL, *marketURL, creds)
 	if err != nil {
@@ -99,19 +107,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	w := stdout
-	if *out != "" {
-		f, err := os.OpenFile(*out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		defer f.Close()
-		w = f
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rep); err != nil {
+	if err := writeReport(rep, *out, stdout); err != nil {
 		fmt.Fprintln(stderr, "write report:", err)
 		return 1
 	}
@@ -122,6 +118,27 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "report written with %d error(s); see \"errors\"\n", len(rep.Errors))
 	}
 	return 0
+}
+
+// writeReport encodes rep as indented JSON to path, or to stdout when path is
+// empty. A file is closed explicitly so a failed flush is reported.
+func writeReport(rep *venuecheck.Report, path string, stdout io.Writer) (err error) {
+	w := stdout
+	if path != "" {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if cerr := f.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
+		}()
+		w = f
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rep)
 }
 
 func newVenue(name, baseURL, marketURL string, creds *venuecheck.Credentials) (venuecheck.Venue, error) {
@@ -164,7 +181,7 @@ func newVenue(name, baseURL, marketURL string, creds *venuecheck.Credentials) (v
 }
 
 // binanceVenue adapts *binance.Client to venuecheck.Venue: it requests all
-// symbols and keeps the optional ticker and permission methods.
+// symbols and keeps the optional ticker, permission and clock-sync methods.
 type binanceVenue struct{ *binance.Client }
 
 func (b binanceVenue) Symbols(ctx context.Context) ([]exchange.Symbol, error) {

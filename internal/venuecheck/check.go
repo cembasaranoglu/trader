@@ -3,14 +3,19 @@
 // headers, account flags and API key permissions.
 //
 // The report contains no secrets and no balance amounts, so it can be shared.
+// Every string that originates from the exchange is sanitized (control
+// characters removed, invalid UTF-8 replaced, length bounded) before it is
+// written to the report.
 package venuecheck
 
 import (
 	"context"
 	"fmt"
 	"math/big"
-	"sort"
+	"slices"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cembasaranoglu/trader/internal/exchange"
 )
@@ -33,6 +38,12 @@ type TickerSource interface {
 // PermissionSource is implemented by venues that expose API key permissions.
 type PermissionSource interface {
 	KeyPermissions(ctx context.Context) (exchange.KeyPermissions, error)
+}
+
+// ClockSyncer is implemented by venues that can align signed request
+// timestamps with the exchange clock before signed calls.
+type ClockSyncer interface {
+	SyncTime(ctx context.Context) (time.Duration, error)
 }
 
 // Options configures a check run.
@@ -101,6 +112,7 @@ type SymbolReport struct {
 	StepSize                string   `json:"step_size,omitempty"`
 	MinQty                  string   `json:"min_qty,omitempty"`
 	MinNotional             string   `json:"min_notional,omitempty"`
+	MaxNotional             string   `json:"max_notional,omitempty"`
 	NotionalAppliesToMarket bool     `json:"notional_applies_to_market"`
 	BestBid                 string   `json:"best_bid,omitempty"`
 	BestAsk                 string   `json:"best_ask,omitempty"`
@@ -142,7 +154,9 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 	_, hasPerms := v.(PermissionSource)
 	rep := &Report{GeneratedAt: now().UTC(), Venue: opts.Venue, Watched: []SymbolReport{},
 		Warnings: []string{}, Errors: []string{}, ManualChecks: manualChecks(hasPerms)}
-	fail := func(step string, err error) { rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %v", step, err)) }
+	fail := func(step string, err error) {
+		rep.Errors = append(rep.Errors, clean(fmt.Sprintf("%s: %v", step, err), maxErrorLen))
+	}
 	pause := func() error {
 		if opts.Pause <= 0 {
 			return ctx.Err()
@@ -222,16 +236,16 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 
 	// Watched symbols.
 	for _, name := range opts.Symbols {
-		sr := SymbolReport{Name: name}
+		sr := SymbolReport{Name: clean(name, maxFieldLen)}
 		s, ok := byName[name]
 		if !ok {
 			rep.Watched = append(rep.Watched, sr)
 			continue
 		}
-		sr.Found, sr.Status, sr.SpotEnabled, sr.OCOEnabled = true, s.Status, s.SpotEnabled, s.OCOEnabled
-		sr.OrderTypes, sr.STPDefault, sr.STPAllowed = s.OrderTypes, s.STPDefault, s.STPAllowed
+		sr.Found, sr.Status, sr.SpotEnabled, sr.OCOEnabled = true, clean(s.Status, maxFieldLen), s.SpotEnabled, s.OCOEnabled
+		sr.OrderTypes, sr.STPDefault, sr.STPAllowed = cleanAll(s.OrderTypes), clean(s.STPDefault, maxFieldLen), cleanAll(s.STPAllowed)
 		sr.TickSize, sr.StepSize = dec(s.Filters.TickSize), dec(s.Filters.StepSize)
-		sr.MinQty, sr.MinNotional = dec(s.Filters.MinQty), dec(s.Filters.MinNotional)
+		sr.MinQty, sr.MinNotional, sr.MaxNotional = dec(s.Filters.MinQty), dec(s.Filters.MinNotional), dec(s.Filters.MaxNotional)
 		sr.NotionalAppliesToMarket = s.Filters.NotionalAppliesToMarket
 
 		if ob, err := v.Depth(ctx, s, 5); err != nil {
@@ -266,13 +280,21 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 	if !opts.CheckAccount {
 		rep.AccountSkipped = "no credentials file given"
 	} else {
+		if cs, ok := v.(ClockSyncer); ok {
+			if _, err := cs.SyncTime(ctx); err != nil {
+				fail("clock_sync", err)
+			}
+			if err := pause(); err != nil {
+				return rep, err
+			}
+		}
 		if info, err := v.Account(ctx); err != nil {
 			fail("account", err)
 		} else {
 			rep.Account = &AccountReport{
 				CanTrade: info.CanTrade, CanWithdraw: info.CanWithdraw, CanDeposit: info.CanDeposit,
 				MakerRate: dec(info.MakerRate), TakerRate: dec(info.TakerRate),
-				RawMakerCommission: info.RawMakerCommission, RawTakerCommission: info.RawTakerCommission,
+				RawMakerCommission: clean(info.RawMakerCommission, maxFieldLen), RawTakerCommission: clean(info.RawTakerCommission, maxFieldLen),
 				AssetCount: len(info.Balances),
 			}
 		}
@@ -284,13 +306,49 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 				fail("key_permissions", err)
 			} else {
 				rep.KeyPermissions = &PermissionReport{IPRestricted: p.IPRestricted, Reading: p.Reading,
-					SpotTrading: p.SpotTrading, Withdrawals: p.Withdrawals, OtherEnabled: append([]string{}, p.OtherEnabled...)}
+					SpotTrading: p.SpotTrading, Withdrawals: p.Withdrawals, OtherEnabled: cleanAll(p.OtherEnabled)}
 				rep.Warnings = append(rep.Warnings, permissionWarnings(p)...)
 			}
 		}
 	}
-	rep.RateLimitHeaders = v.Usage()
+	rep.RateLimitHeaders = map[string]string{}
+	for k, val := range v.Usage() {
+		rep.RateLimitHeaders[clean(k, maxFieldLen)] = clean(val, maxFieldLen)
+	}
 	return rep, nil
+}
+
+// Report string bounds.
+const (
+	maxFieldLen = 128
+	maxErrorLen = 512
+)
+
+// clean makes an untrusted string safe for the report: invalid UTF-8 becomes
+// "?", control characters are dropped and the result is cut to limit bytes on
+// a rune boundary.
+func clean(s string, limit int) string {
+	s = strings.ToValidUTF8(s, "?")
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			continue
+		}
+		if b.Len()+len(string(r)) > limit {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func cleanAll(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		out = append(out, clean(s, maxFieldLen))
+	}
+	return out
 }
 
 // permissionWarnings flags permissions the design forbids (I-7) or limits.
@@ -303,7 +361,7 @@ func permissionWarnings(p exchange.KeyPermissions) []string {
 		w = append(w, "API key can trade without an IP restriction: restrict it to the server IP")
 	}
 	if len(p.OtherEnabled) > 0 {
-		w = append(w, fmt.Sprintf("API key has extra permissions enabled: %v; only reading (and later spot trading) is needed", p.OtherEnabled))
+		w = append(w, fmt.Sprintf("API key has extra permissions enabled: %v; only reading (and later spot trading) is needed", cleanAll(p.OtherEnabled)))
 	}
 	return w
 }
@@ -328,20 +386,27 @@ func topByVolume(ts []exchange.Ticker, byName map[string]exchange.Symbol, quote 
 			cand = append(cand, t)
 		}
 	}
-	sort.Slice(cand, func(i, j int) bool { return cand[i].QuoteVolume.Cmp(cand[j].QuoteVolume) > 0 })
+	// Highest volume first; equal volumes are ordered by symbol name so the
+	// ranking is deterministic.
+	slices.SortStableFunc(cand, func(a, b exchange.Ticker) int {
+		if c := b.QuoteVolume.Cmp(a.QuoteVolume); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Symbol, b.Symbol)
+	})
 	if len(cand) > n {
 		cand = cand[:n]
 	}
 	out := make([]TopSymbol, 0, len(cand))
 	for _, t := range cand {
-		out = append(out, TopSymbol{Symbol: t.Symbol, QuoteVolume24h: t.QuoteVolume.FloatString(0), LastPrice: dec(t.LastPrice)})
+		out = append(out, TopSymbol{Symbol: clean(t.Symbol, maxFieldLen), QuoteVolume24h: t.QuoteVolume.FloatString(0), LastPrice: dec(t.LastPrice)})
 	}
 	return out
 }
 
 func median(xs []int64) int64 {
-	s := append([]int64(nil), xs...)
-	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	s := slices.Clone(xs)
+	slices.Sort(s)
 	n := len(s)
 	if n%2 == 1 {
 		return s[n/2]

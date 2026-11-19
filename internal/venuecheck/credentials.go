@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // ErrInsecureCredentialsFile is returned when a credentials or key file can
@@ -21,6 +22,9 @@ type Credentials struct {
 	APIKey     string
 	SecretKey  string
 	Ed25519PEM []byte
+	// Warnings are non-secret notes about checks that could not be performed
+	// on this platform (for example file ACLs on Windows).
+	Warnings []string
 }
 
 // String redacts the credentials.
@@ -34,10 +38,12 @@ func (c Credentials) GoString() string { return c.String() }
 //	{"api_key": "...", "secret_key": "..."}                       (HMAC key)
 //	{"api_key": "...", "ed25519_private_key_file": "/path/key.pem"} (Ed25519 key)
 //
-// Both the credentials file and the key file must have no group or other
-// permissions. Error messages never include file contents.
+// A relative ed25519_private_key_file is resolved against the directory of
+// the credentials file. On Unix both files must be regular files (not
+// symlinks), owned by the current user, with no group or other permissions.
+// Error messages never include file contents.
 func LoadCredentials(path string) (*Credentials, error) {
-	data, err := readPrivateFile(path)
+	data, warn, err := readPrivateFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +58,9 @@ func LoadCredentials(path string) (*Credentials, error) {
 		// Do not wrap the decoder error: it can quote file contents.
 		return nil, errors.New("venuecheck: credentials file is not valid JSON with api_key and secret_key or ed25519_private_key_file")
 	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("venuecheck: credentials file has data after the JSON object")
+	}
 	if v.APIKey == "" {
 		return nil, errors.New("venuecheck: credentials file needs api_key")
 	}
@@ -59,41 +68,55 @@ func LoadCredentials(path string) (*Credentials, error) {
 	case v.SecretKey != "" && v.Ed25519Key != "":
 		return nil, errors.New("venuecheck: give either secret_key or ed25519_private_key_file, not both")
 	case v.SecretKey != "":
-		return &Credentials{APIKey: v.APIKey, SecretKey: v.SecretKey}, nil
+		return &Credentials{APIKey: v.APIKey, SecretKey: v.SecretKey, Warnings: warn}, nil
 	case v.Ed25519Key != "":
-		pemBytes, err := readPrivateFile(v.Ed25519Key)
+		keyPath := v.Ed25519Key
+		if !filepath.IsAbs(keyPath) {
+			keyPath = filepath.Join(filepath.Dir(path), keyPath)
+		}
+		pemBytes, keyWarn, err := readPrivateFile(keyPath)
 		if err != nil {
 			return nil, fmt.Errorf("venuecheck: ed25519 key file: %w", err)
 		}
-		return &Credentials{APIKey: v.APIKey, Ed25519PEM: pemBytes}, nil
+		return &Credentials{APIKey: v.APIKey, Ed25519PEM: pemBytes, Warnings: append(warn, keyWarn...)}, nil
 	default:
 		return nil, errors.New("venuecheck: credentials file needs secret_key or ed25519_private_key_file")
 	}
 }
 
-// readPrivateFile reads a small regular file that only its owner can access.
-func readPrivateFile(path string) ([]byte, error) {
+// readPrivateFile reads a small regular, non-symlink file and applies the
+// platform's privacy check (see checkPrivate). The file is opened and then
+// compared with the Lstat result so a swap between the two calls is detected.
+func readPrivateFile(path string) ([]byte, []string, error) {
+	lst, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("venuecheck: stat: %w", err)
+	}
+	if !lst.Mode().IsRegular() {
+		return nil, nil, errors.New("venuecheck: not a regular file (symlinks are rejected)")
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("venuecheck: open: %w", err)
+		return nil, nil, fmt.Errorf("venuecheck: open: %w", err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("venuecheck: stat: %w", err)
+		return nil, nil, fmt.Errorf("venuecheck: stat: %w", err)
 	}
-	if !st.Mode().IsRegular() {
-		return nil, errors.New("venuecheck: not a regular file")
+	if !os.SameFile(lst, st) {
+		return nil, nil, errors.New("venuecheck: file changed while opening")
 	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return nil, ErrInsecureCredentialsFile
+	warnings, err := checkPrivate(path, st)
+	if err != nil {
+		return nil, nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxSecretFileBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("venuecheck: read: %w", err)
+		return nil, nil, fmt.Errorf("venuecheck: read: %w", err)
 	}
 	if len(data) > maxSecretFileBytes {
-		return nil, errors.New("venuecheck: file too large")
+		return nil, nil, errors.New("venuecheck: file too large")
 	}
-	return data, nil
+	return data, warnings, nil
 }

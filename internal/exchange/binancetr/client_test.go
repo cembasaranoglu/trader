@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cembasaranoglu/trader/internal/exchange"
+	"github.com/cembasaranoglu/trader/internal/exchange/httpx"
 )
 
 type fakeClock struct {
@@ -335,8 +336,8 @@ func TestRateLimitBackoff(t *testing.T) {
 		wantWait   time.Duration
 	}{
 		{"429 with header", http.StatusTooManyRequests, "5", 5 * time.Second},
-		{"418 without header uses default", http.StatusTeapot, "", defaultRetryAfter},
-		{"429 malformed header uses default", http.StatusTooManyRequests, "soon", defaultRetryAfter},
+		{"418 without header uses default", http.StatusTeapot, "", httpx.DefaultRetryAfter},
+		{"429 malformed header uses default", http.StatusTooManyRequests, "soon", httpx.DefaultRetryAfter},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

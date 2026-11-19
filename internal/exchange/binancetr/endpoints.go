@@ -38,15 +38,18 @@ func (c *Client) ServerTime(ctx context.Context) (time.Time, error) {
 }
 
 type wireFilter struct {
-	FilterType    string `json:"filterType"`
-	TickSize      string `json:"tickSize"`
-	MinPrice      string `json:"minPrice"`
-	MaxPrice      string `json:"maxPrice"`
-	StepSize      string `json:"stepSize"`
-	MinQty        string `json:"minQty"`
-	MaxQty        string `json:"maxQty"`
-	MinNotional   string `json:"minNotional"`
-	ApplyToMarket bool   `json:"applyToMarket"`
+	FilterType       string `json:"filterType"`
+	TickSize         string `json:"tickSize"`
+	MinPrice         string `json:"minPrice"`
+	MaxPrice         string `json:"maxPrice"`
+	StepSize         string `json:"stepSize"`
+	MinQty           string `json:"minQty"`
+	MaxQty           string `json:"maxQty"`
+	MinNotional      string `json:"minNotional"`
+	MaxNotional      string `json:"maxNotional"`
+	ApplyToMarket    bool   `json:"applyToMarket"`    // MIN_NOTIONAL; also on NOTIONAL in Binance TR docs
+	ApplyMinToMarket *bool  `json:"applyMinToMarket"` // NOTIONAL (Binance global form)
+	ApplyMaxToMarket bool   `json:"applyMaxToMarket"` // NOTIONAL
 }
 
 type wireSymbol struct {
@@ -107,6 +110,7 @@ func parseFilters(ws []wireFilter) (exchange.Filters, error) {
 		*dst = r
 		return nil
 	}
+	var sawNotional bool
 	for _, w := range ws {
 		var errs []error
 		switch w.FilterType {
@@ -114,7 +118,23 @@ func parseFilters(ws []wireFilter) (exchange.Filters, error) {
 			errs = append(errs, dec(w.TickSize, &f.TickSize), dec(w.MinPrice, &f.MinPrice), dec(w.MaxPrice, &f.MaxPrice))
 		case "LOT_SIZE":
 			errs = append(errs, dec(w.StepSize, &f.StepSize), dec(w.MinQty, &f.MinQty), dec(w.MaxQty, &f.MaxQty))
-		case "NOTIONAL", "MIN_NOTIONAL":
+		case "NOTIONAL":
+			// NOTIONAL takes precedence over MIN_NOTIONAL whatever the order.
+			// Binance TR's documented NOTIONAL example carries applyToMarket;
+			// the Binance global form is applyMinToMarket. Prefer the latter
+			// when present.
+			sawNotional = true
+			f.MinNotional, f.MaxNotional = nil, nil
+			errs = append(errs, dec(w.MinNotional, &f.MinNotional), dec(w.MaxNotional, &f.MaxNotional))
+			f.NotionalAppliesToMarket = w.ApplyToMarket
+			if w.ApplyMinToMarket != nil {
+				f.NotionalAppliesToMarket = *w.ApplyMinToMarket
+			}
+			f.MaxNotionalAppliesToMarket = w.ApplyMaxToMarket
+		case "MIN_NOTIONAL":
+			if sawNotional {
+				continue
+			}
 			errs = append(errs, dec(w.MinNotional, &f.MinNotional))
 			f.NotionalAppliesToMarket = w.ApplyToMarket
 		}

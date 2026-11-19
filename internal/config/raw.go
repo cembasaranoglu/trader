@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -25,9 +26,9 @@ type rawConfig struct {
 }
 
 type rawVenue struct {
-	Primary          *string `yaml:"primary"`
-	Secondary        *string `yaml:"secondary"`
-	SecondaryEnabled *bool   `yaml:"secondary_enabled"`
+	Primary          *string   `yaml:"primary"`
+	Secondary        *string   `yaml:"secondary"`
+	SecondaryEnabled *yamlBool `yaml:"secondary_enabled"`
 }
 
 type rawCapital struct {
@@ -48,17 +49,17 @@ type rawRisk struct {
 	MaxPositionPct          *float64        `yaml:"max_position_pct"`
 	MaxGrossExposurePct     *float64        `yaml:"max_gross_exposure_pct"`
 	PriceCollarBps          *float64        `yaml:"price_collar_bps"`
-	MaxDataAgeMs            *int            `yaml:"max_data_age_ms"`
-	MaxOrdersPerMin         *int            `yaml:"max_orders_per_min"`
+	MaxDataAgeMs            *yamlInt        `yaml:"max_data_age_ms"`
+	MaxOrdersPerMin         *yamlInt        `yaml:"max_orders_per_min"`
 	MaxEntriesPerWindow     *rawEntryWindow `yaml:"max_entries_per_window"`
 	CashReservePct          *float64        `yaml:"cash_reserve_pct"`
 	MinEdgeToCostRatio      *float64        `yaml:"min_edge_to_cost_ratio"`
-	ReconcileToleranceSteps *int            `yaml:"reconcile_tolerance_steps"`
-	ReconcileEscalateCycles *int            `yaml:"reconcile_escalate_cycles"`
+	ReconcileToleranceSteps *yamlInt        `yaml:"reconcile_tolerance_steps"`
+	ReconcileEscalateCycles *yamlInt        `yaml:"reconcile_escalate_cycles"`
 }
 
 type rawEntryWindow struct {
-	Count  *int          `yaml:"count"`
+	Count  *yamlInt      `yaml:"count"`
 	Window *yamlDuration `yaml:"window"`
 }
 
@@ -67,8 +68,8 @@ type rawExecution struct {
 }
 
 type rawOps struct {
-	MaxClockSkewMs    *int `yaml:"max_clock_skew_ms"`
-	HeartbeatTimeoutS *int `yaml:"heartbeat_timeout_s"`
+	MaxClockSkewMs    *yamlInt `yaml:"max_clock_skew_ms"`
+	HeartbeatTimeoutS *yamlInt `yaml:"heartbeat_timeout_s"`
 }
 
 type rawLLM struct {
@@ -91,28 +92,28 @@ type rawAgents struct {
 }
 
 type rawAgentLimits struct {
-	Enabled        *bool `yaml:"enabled"`
-	MaxCallsPerDay *int  `yaml:"max_calls_per_day"`
+	Enabled        *yamlBool `yaml:"enabled"`
+	MaxCallsPerDay *yamlInt  `yaml:"max_calls_per_day"`
 }
 
 type rawThesisLimits struct {
-	Enabled              *bool `yaml:"enabled"`
-	MaxCallsPerDay       *int  `yaml:"max_calls_per_day"`
-	MaxEscalationsPerDay *int  `yaml:"max_escalations_per_day"`
+	Enabled              *yamlBool `yaml:"enabled"`
+	MaxCallsPerDay       *yamlInt  `yaml:"max_calls_per_day"`
+	MaxEscalationsPerDay *yamlInt  `yaml:"max_escalations_per_day"`
 }
 
 type rawSwitch struct {
-	Enabled *bool `yaml:"enabled"`
+	Enabled *yamlBool `yaml:"enabled"`
 }
 
 type rawLearning struct {
-	MinSupportingTrades *int     `yaml:"min_supporting_trades"`
+	MinSupportingTrades *yamlInt `yaml:"min_supporting_trades"`
 	MaxParamDeltaPct    *float64 `yaml:"max_param_delta_pct"`
 }
 
 type rawGates struct {
-	PaperMinDays     *int     `yaml:"paper_min_days"`
-	G2MinDays        *int     `yaml:"g2_min_days"`
+	PaperMinDays     *yamlInt `yaml:"paper_min_days"`
+	G2MinDays        *yamlInt `yaml:"g2_min_days"`
 	EdgeCostMultiple *float64 `yaml:"edge_cost_multiple"`
 }
 
@@ -127,8 +128,40 @@ func (d *yamlDuration) UnmarshalYAML(n *yaml.Node) error {
 	}
 	v, err := time.ParseDuration(n.Value)
 	if err != nil {
-		return fmt.Errorf("line %d: %w", n.Line, err)
+		return fmt.Errorf("line %d: invalid duration", n.Line)
 	}
 	*d = yamlDuration(v)
+	return nil
+}
+
+// yamlInt accepts only YAML integers. A float such as 10.9 is rejected
+// instead of being truncated to 10.
+type yamlInt int64
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (i *yamlInt) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode || n.Tag != "!!int" {
+		return fmt.Errorf("line %d: must be an integer", n.Line)
+	}
+	var v int64
+	if err := n.Decode(&v); err != nil {
+		return fmt.Errorf("line %d: integer out of range", n.Line)
+	}
+	if v > math.MaxInt32 || v < math.MinInt32 {
+		return fmt.Errorf("line %d: integer out of range", n.Line)
+	}
+	*i = yamlInt(v)
+	return nil
+}
+
+// yamlBool accepts only the literals true and false (no yes/no/on/off).
+type yamlBool bool
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (b *yamlBool) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode || n.Tag != "!!bool" || (n.Value != "true" && n.Value != "false") {
+		return fmt.Errorf("line %d: must be true or false", n.Line)
+	}
+	*b = n.Value == "true"
 	return nil
 }

@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cembasaranoglu/trader/internal/exchange/httpx"
 )
 
 // Default hosts as documented by Binance TR.
@@ -34,8 +36,6 @@ const (
 	DefaultRequestTimeout = 10 * time.Second
 	// MaxBodyBytes bounds every response body read by the client.
 	MaxBodyBytes = 8 << 20
-	// defaultRetryAfter is used when a 429/418 carries no usable Retry-After header.
-	defaultRetryAfter = 60 * time.Second
 )
 
 // Credentials authenticate signed endpoints. The secret is never printed.
@@ -55,7 +55,7 @@ type Options struct {
 	BaseURL       string
 	MainMarketURL string
 	NextMarketURL string
-	HTTPClient    *http.Client // nil: a client with DefaultRequestTimeout
+	HTTPClient    *http.Client // copied, never follows redirects; nil: DefaultRequestTimeout
 	Credentials   *Credentials // nil: signed endpoints return ErrNoCredentials
 	RecvWindow    time.Duration
 	Now           func() time.Time // nil: time.Now; injectable for tests
@@ -78,44 +78,28 @@ type Client struct {
 
 // New returns a Client. It fails on malformed URLs or invalid credentials.
 func New(opts Options) (*Client, error) {
-	pick := func(v, def string) string {
-		if v == "" {
-			return def
-		}
-		return v
-	}
-	parse := func(name, raw string) (*url.URL, error) {
-		u, err := url.Parse(raw)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return nil, fmt.Errorf("binancetr: invalid %s %q", name, raw)
-		}
-		return u, nil
-	}
-	base, err := parse("BaseURL", pick(opts.BaseURL, DefaultBaseURL))
+	base, err := httpx.ParseBaseURL("BaseURL", opts.BaseURL, DefaultBaseURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binancetr: %w", err)
 	}
-	mainM, err := parse("MainMarketURL", pick(opts.MainMarketURL, DefaultMainMarketURL))
+	mainM, err := httpx.ParseBaseURL("MainMarketURL", opts.MainMarketURL, DefaultMainMarketURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binancetr: %w", err)
 	}
-	nextM, err := parse("NextMarketURL", pick(opts.NextMarketURL, DefaultNextMarketURL))
+	nextM, err := httpx.ParseBaseURL("NextMarketURL", opts.NextMarketURL, DefaultNextMarketURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binancetr: %w", err)
 	}
 	if c := opts.Credentials; c != nil && (c.APIKey == "" || c.SecretKey == "") {
 		return nil, errors.New("binancetr: credentials must include both API key and secret key")
 	}
-	hc := opts.HTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: DefaultRequestTimeout}
-	}
+	hc := httpx.NoRedirectClient(opts.HTTPClient, DefaultRequestTimeout)
 	rw := opts.RecvWindow
 	if rw == 0 {
 		rw = DefaultRecvWindow
 	}
-	if rw < 0 || rw > 60*time.Second {
-		return nil, fmt.Errorf("binancetr: recvWindow must be in (0, 60s], got %s", rw)
+	if rw < time.Millisecond || rw > 60*time.Second {
+		return nil, fmt.Errorf("binancetr: recvWindow must be in [1ms, 60s], got %s", rw)
 	}
 	now := opts.Now
 	if now == nil {
@@ -160,9 +144,10 @@ func (c *Client) do(ctx context.Context, r request) ([]byte, error) {
 	if err := c.checkBackoff(); err != nil {
 		return nil, err
 	}
-	q := r.query
-	if q == nil {
-		q = url.Values{}
+	// Copy the caller's values: signing adds timestamp and recvWindow.
+	q := make(url.Values, len(r.query)+2)
+	for k, v := range r.query {
+		q[k] = append([]string(nil), v...)
 	}
 	var rawQuery string
 	if r.signed {
@@ -209,9 +194,11 @@ func (c *Client) do(ctx context.Context, r request) ([]byte, error) {
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusTeapot:
-		ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+		ra := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
 		c.setBackoff(ra)
 		return nil, &RateLimitError{Status: resp.StatusCode, RetryAfter: ra}
+	case resp.StatusCode >= 300 && resp.StatusCode <= 399:
+		return nil, fmt.Errorf("binancetr: %s %s: HTTP %d: %w", r.method, r.path, resp.StatusCode, httpx.ErrRedirect)
 	case resp.StatusCode >= 500:
 		return nil, &ServerError{Status: resp.StatusCode}
 	case resp.StatusCode >= 400:
@@ -219,6 +206,9 @@ func (c *Client) do(ctx context.Context, r request) ([]byte, error) {
 		return nil, &APIError{HTTPStatus: resp.StatusCode, Code: code, Msg: msg}
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return nil, &APIError{HTTPStatus: resp.StatusCode, Msg: "unexpected status"}
+	}
+	if httpx.IsNullJSON(body) {
+		return nil, fmt.Errorf("binancetr: %s %s: null body", r.method, r.path)
 	}
 	return body, nil
 }
@@ -258,16 +248,6 @@ func sign(secret, payload string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// parseRetryAfter reads a Retry-After value in seconds, falling back to a
-// conservative default when the header is missing or malformed.
-func parseRetryAfter(v string) time.Duration {
-	s, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || s <= 0 {
-		return defaultRetryAfter
-	}
-	return time.Duration(s) * time.Second
-}
-
 // envelope is the documented Binance TR response wrapper. Some order
 // endpoints use "message" in place of "msg".
 type envelope struct {
@@ -301,6 +281,11 @@ func unwrap(body []byte) (json.RawMessage, envelope, Shape, error) {
 			if *env.Code != 0 {
 				return nil, env, ShapeEnvelope, &APIError{HTTPStatus: http.StatusOK, Code: *env.Code, Msg: env.message()}
 			}
+			if httpx.IsNullJSON(env.Data) {
+				// A null payload decodes into zero values without error;
+				// return no data so callers that need a payload fail to decode.
+				return nil, env, ShapeEnvelope, nil
+			}
 			return env.Data, env, ShapeEnvelope, nil
 		}
 	}
@@ -320,10 +305,10 @@ func envelopeError(body []byte) (int, string) {
 	if err := json.Unmarshal(body, &env); err == nil && env.Code != nil {
 		return *env.Code, env.message()
 	}
-	const max = 256
-	s := strings.TrimSpace(string(body))
-	if len(s) > max {
-		s = s[:max] + "…"
+	const limit = 256
+	s := strings.ToValidUTF8(strings.TrimSpace(string(body)), "?")
+	if len(s) > limit {
+		s = strings.ToValidUTF8(s[:limit], "") + "…"
 	}
 	return 0, s
 }

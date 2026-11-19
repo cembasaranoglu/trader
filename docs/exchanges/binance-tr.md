@@ -24,7 +24,7 @@ Tek bir ölçümdür; spread ve saat farkı ana göre değişir.
 | Saat farkı | Medyan +60 ms (sunucu yerelden ileride), en yüksek gidiş-dönüş 471 ms | `ops.max_clock_skew_ms: 500` ile uyumlu |
 | Sembol sayısı | 309 sembolün tamamı TRY paritesi, tamamı spot işleme açık, tamamı symbol type 1 | "Next" host'u (tip 2/3) şu an kullanılmıyor |
 | Piyasa verisi formatı | Depth ve klines **ham** (zarfsız) Binance formatında döndü | Doküman zarf gösteriyordu; adaptör ikisini de kabul ettiği için sorun çıkmadı |
-| BTC_TRY kuralları | Tick 1 TRY, step 0,00001, min miktar 0,00001, **min notional 10 TRY**, OCO açık | Notional kontrolü market emirlerine uygulanma bayrağı `false` döndü |
+| BTC_TRY kuralları | Tick 1 TRY, step 0,00001, min miktar 0,00001, **min notional 10 TRY**, OCO açık | Market bayrağı `false` okundu, ancak o sürüm NOTIONAL filtresinde `applyMinToMarket` alanını okumuyordu; bu bayrak **doğrulanmamış** sayılır ve yeniden ölçülmeli |
 | ETH_TRY kuralları | Tick 1 TRY, step 0,0001, min miktar 0,0001, **min notional 10 TRY**, OCO açık | — |
 | Emir tipleri | LIMIT, LIMIT_MAKER, MARKET, STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT | Doküman örneğinde olmayan STOP_LOSS ve TAKE_PROFIT de var |
 | STP | Varsayılan EXPIRE_MAKER; izinli: EXPIRE_TAKER, EXPIRE_MAKER, EXPIRE_BOTH, DECREMENT, TRANSFER | Config'teki `EXPIRE_TAKER` destekleniyor |

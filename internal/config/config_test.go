@@ -3,6 +3,7 @@ package config_test
 import (
 	"bytes"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,7 +124,8 @@ func TestLoadRejects(t *testing.T) {
 		{"unsupported venue", func(t *testing.T, m map[string]any) { set(t, m, "venue.primary", "kraken") }, config.ErrInvalid, "venue.primary"},
 		{"secondary venue before W9", func(t *testing.T, m map[string]any) { set(t, m, "venue.secondary_enabled", true) }, config.ErrInvalid, "venue.secondary_enabled"},
 		{"unsupported quote", func(t *testing.T, m map[string]any) { set(t, m, "quote_currency", "EUR") }, config.ErrInvalid, "quote_currency"},
-		{"quote does not match venue", func(t *testing.T, m map[string]any) { set(t, m, "quote_currency", "TRY") }, config.ErrInvalid, "quote_currency"},
+		{"TRY quote not supported", func(t *testing.T, m map[string]any) { set(t, m, "quote_currency", "TRY") }, config.ErrInvalid, "quote_currency"},
+		{"binance_tr primary not supported", func(t *testing.T, m map[string]any) { set(t, m, "venue.primary", "binance_tr") }, config.ErrInvalid, "venue.primary"},
 		{"drawdown below D-11 floor", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_drawdown_pct", 29.9) }, config.ErrInvalid, "risk.max_drawdown_pct"},
 		{"drawdown above 100", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_drawdown_pct", 101) }, config.ErrInvalid, "risk.max_drawdown_pct"},
 		{"zero daily loss", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_daily_loss_pct", 0) }, config.ErrInvalid, "risk.max_daily_loss_pct"},
@@ -149,6 +151,22 @@ func TestLoadRejects(t *testing.T) {
 		{"unknown top-level key", func(t *testing.T, m map[string]any) { m["api_key"] = "x" }, config.ErrDecode, ""},
 		{"window without unit", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_entries_per_window.window", 60) }, config.ErrDecode, ""},
 		{"wrong scalar type", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_orders_per_min", "ten") }, config.ErrDecode, ""},
+		{"infinite drawdown", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_drawdown_pct", math.Inf(1)) }, config.ErrInvalid, "risk.max_drawdown_pct"},
+		{"NaN order notional", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_order_notional_usd", math.NaN()) }, config.ErrInvalid, "risk.max_order_notional_usd"},
+		{"infinite planned capital", func(t *testing.T, m map[string]any) { set(t, m, "capital.planned_usd", math.Inf(1)) }, config.ErrInvalid, "capital.planned_usd"},
+		{"negative infinite reserve", func(t *testing.T, m map[string]any) { set(t, m, "risk.cash_reserve_pct", math.Inf(-1)) }, config.ErrInvalid, "risk.cash_reserve_pct"},
+		{"collar above 100%", func(t *testing.T, m map[string]any) { set(t, m, "risk.price_collar_bps", 10001) }, config.ErrInvalid, "risk.price_collar_bps"},
+		{"data age above 60s", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_data_age_ms", 60001) }, config.ErrInvalid, "risk.max_data_age_ms"},
+		{"data age overflow", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_data_age_ms", int64(1)<<62) }, config.ErrDecode, ""},
+		{"clock skew above recvWindow max", func(t *testing.T, m map[string]any) { set(t, m, "ops.max_clock_skew_ms", 60001) }, config.ErrInvalid, "ops.max_clock_skew_ms"},
+		{"heartbeat above 1h", func(t *testing.T, m map[string]any) { set(t, m, "ops.heartbeat_timeout_s", 3601) }, config.ErrInvalid, "ops.heartbeat_timeout_s"},
+		{"window below 1m", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_entries_per_window.window", "59s") }, config.ErrInvalid, "risk.max_entries_per_window.window"},
+		{"window above 24h", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_entries_per_window.window", "25h") }, config.ErrInvalid, "risk.max_entries_per_window.window"},
+		{"float for integer", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_orders_per_min", 10.9) }, config.ErrDecode, ""},
+		{"string for bool", func(t *testing.T, m map[string]any) { set(t, m, "agents.critic.enabled", "true") }, config.ErrDecode, ""},
+		{"whitespace model id", func(t *testing.T, m map[string]any) { set(t, m, "llm.models.synthesis", "   ") }, config.ErrInvalid, "llm.models.synthesis"},
+		{"padded model id", func(t *testing.T, m map[string]any) { set(t, m, "llm.models.synthesis", " claude-sonnet-5-5") }, config.ErrInvalid, "llm.models.synthesis"},
+		{"gross plus reserve above 100", func(t *testing.T, m map[string]any) { set(t, m, "risk.cash_reserve_pct", 25) }, config.ErrInvalid, "risk.max_gross_exposure_pct"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,17 +204,6 @@ func hasFieldError(err error, path string, sentinel error) bool {
 		}
 	}
 	return false
-}
-
-func TestLoadAcceptsBinanceTR(t *testing.T) {
-	t.Parallel()
-	m := exampleMap(t)
-	set(t, m, "venue.primary", "binance_tr")
-	set(t, m, "quote_currency", "TRY")
-	cfg, err := config.Load(bytes.NewReader(marshal(t, m)))
-	if err != nil || cfg.Venue.Primary != "binance_tr" || cfg.QuoteCurrency != "TRY" {
-		t.Fatalf("binance_tr/TRY must load: %v", err)
-	}
 }
 
 func TestLoadReportsEveryProblem(t *testing.T) {
@@ -248,5 +255,52 @@ func TestLoadFileMissing(t *testing.T) {
 	_, err := config.LoadFile(filepath.Join(t.TempDir(), "nope.yaml"))
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("want os.ErrNotExist, got %v", err)
+	}
+}
+
+// TestLoadRejectsLooseScalars uses raw text because a Go map cannot express
+// YAML 1.1 booleans or untagged floats in integer fields.
+func TestLoadRejectsLooseScalars(t *testing.T) {
+	t.Parallel()
+	example := string(readExample(t))
+	tests := []struct{ name, old, new string }{
+		{"yes as bool", "secondary_enabled: false", "secondary_enabled: no"},
+		{"on as bool", "    enabled: true\n    max_calls_per_day: 40", "    enabled: on\n    max_calls_per_day: 40"},
+		{"float literal for int", "max_orders_per_min: 10", "max_orders_per_min: 1e1"},
+		{"dot inf", "max_drawdown_pct: 30", "max_drawdown_pct: .inf"},
+		{"bool for int", "paper_min_days: 60", "paper_min_days: true"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !strings.Contains(example, tc.old) {
+				t.Fatalf("example does not contain %q", tc.old)
+			}
+			_, err := config.Load(strings.NewReader(strings.Replace(example, tc.old, tc.new, 1)))
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !errors.Is(err, config.ErrDecode) && !errors.Is(err, config.ErrInvalid) {
+				t.Fatalf("unexpected error class: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadDecodeErrorRedactsValues(t *testing.T) {
+	t.Parallel()
+	example := string(readExample(t))
+	for _, repl := range [][2]string{
+		{"max_orders_per_min: 10", "max_orders_per_min: sk-SECRET-VALUE"},
+		{"price_collar_bps: 50", "price_collar_bps: sk-SECRET-VALUE"},
+		{"mode: paper", "mode: [sk-SECRET-VALUE]"},
+	} {
+		_, err := config.Load(strings.NewReader(strings.Replace(example, repl[0], repl[1], 1)))
+		if !errors.Is(err, config.ErrDecode) {
+			t.Fatalf("%s: want ErrDecode, got %v", repl[1], err)
+		}
+		if strings.Contains(err.Error(), "SECRET") {
+			t.Fatalf("decode error leaks the value: %v", err)
+		}
 	}
 }

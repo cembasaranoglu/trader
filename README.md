@@ -2,7 +2,7 @@
 
 LLM destekli, kripto spot piyasasında (binance.com, USDT pariteleri) çalışan bir işlem sistemi. LLM ajanları yalnızca şemalı öneri üretir. Emirlere deterministik Go çekirdeğindeki risk motoru karar verir.
 
-> **Durum:** Wave W1. Konfigürasyon doğrulayıcı ve binance.com ile Binance TR için salt okuma istemcileri (saat, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri) var. Emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz.
+> **Durum:** Wave W1a tamam. Konfigürasyon doğrulayıcı, binance.com salt okuma REST istemcisi (saat senkronu, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri) ve `venuecheck` tanı aracı var. WebSocket, emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz. Sıradaki işler: [docs/plan/01-waves.md](docs/plan/01-waves.md).
 >
 > Bu yazılım yatırım tavsiyesi değildir. Kâr garantisi yoktur.
 
@@ -10,7 +10,7 @@ Tasarım ve dalga planı: [Plan dokümanı](https://claude.ai/artifact/7Rgd1jjuX
 
 ## Gereksinimler
 
-- Go 1.24.7 (`go.mod`)
+- Go 1.26 (`go.mod`; `toolchain go1.26.11`, eski bir Go kuruluysa `GOTOOLCHAIN=auto` ile otomatik indirilir)
 
 ## Kullanım
 
@@ -29,7 +29,7 @@ Yalnızca herkese açık veri (anahtar gerekmez):
 
 ```sh
 go run ./cmd/venuecheck -out venuecheck-report.json            # binance.com (varsayılan)
-go run ./cmd/venuecheck -venue binance_tr -out venuecheck-report.json
+go run ./cmd/venuecheck -venue binance_tr -out venuecheck-report.json   # yalnız tanı amaçlı
 ```
 
 Hesap bayrakları ve anahtar yetkileri için **yalnız okuma** yetkili bir anahtarla:
@@ -43,7 +43,9 @@ chmod 600 ~/.config/trader/binance.json
 go run ./cmd/venuecheck -credentials ~/.config/trader/binance.json -out venuecheck-report.json
 ```
 
-binance.com'da anahtarın yetkileri (`/sapi/v1/account/apiRestrictions`) da okunur. Çekim yetkisi açıksa, IP kısıtlaması olmadan işlem yetkisi varsa ya da gereksiz başka bir yetki açıksa rapor `warnings` altında uyarır. Kimlik dosyası ve Ed25519 anahtar dosyası grup veya diğer kullanıcılar tarafından okunabiliyorsa komut çalışmaz. Şifreli (parolalı) Ed25519 anahtarları desteklenmez.
+binance.com'da anahtarın yetkileri (`/sapi/v1/account/apiRestrictions`) da okunur. Çekim yetkisi açıksa, IP kısıtlaması olmadan işlem yetkisi varsa ya da gereksiz başka bir yetki açıksa rapor `warnings` altında uyarır. İmzalı isteklerden önce yerel saat borsa saatine göre ölçülür ve istek zaman damgasına uygulanır.
+
+Kimlik dosyası kuralları: Linux/macOS'ta kimlik dosyası ve Ed25519 anahtar dosyası sembolik bağlantı olamaz, çalıştıran kullanıcıya ait olmalı ve yalnız sahibi okuyabilmeli (`chmod 600`); aksi halde komut çalışmaz. Windows'ta dosya erişim listesi (ACL) kontrol edilemez; komut bunu uyarı olarak yazar. Göreli `ed25519_private_key_file` yolu kimlik dosyasının bulunduğu klasöre göre çözülür. Şifreli (parolalı) Ed25519 anahtarları desteklenmez.
 
 Ayrıntılar: [docs/exchanges/binance.md](docs/exchanges/binance.md), [docs/exchanges/binance-tr.md](docs/exchanges/binance-tr.md).
 
@@ -60,8 +62,11 @@ API anahtarları hiçbir zaman config dosyasına, koda ya da loglara yazılmaz. 
 ```sh
 gofmt -l .
 go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 go test -race ./...
 go build ./...
+python3 scripts/gen_schema.py configs/example.yaml > configs/schema.json   # config alanı değişince
 ```
 
 CI aynı adımları `.github/workflows/ci.yml` içinde çalıştırır.

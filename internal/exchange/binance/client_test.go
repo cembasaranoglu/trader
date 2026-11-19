@@ -146,7 +146,7 @@ func TestNewValidation(t *testing.T) {
 func TestServerTime(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/md/api/v3/time" {
+		if r.URL.Path != "/base/api/v3/time" {
 			t.Errorf("path %s", r.URL.Path)
 		}
 		fmt.Fprint(w, `{"serverTime":1700000000123}`)

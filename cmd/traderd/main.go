@@ -1,6 +1,7 @@
 // Command traderd is the trading process.
 //
-// In wave W0 it only loads and validates the configuration, then exits.
+// It currently only loads and validates the configuration, then exits; the
+// trading runtime is added wave by wave (docs/plan/01-waves.md).
 // Exit codes: 0 valid, 1 invalid configuration, 2 usage error.
 package main
 

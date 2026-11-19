@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +183,9 @@ func TestHelpers(t *testing.T) {
 
 func TestLoadCredentials(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not meaningful on Windows; see private_other.go")
+	}
 	dir := t.TempDir()
 	write := func(name, body string, perm os.FileMode) string {
 		p := filepath.Join(dir, name)
@@ -207,6 +211,17 @@ func TestLoadCredentials(t *testing.T) {
 	if s := strings.Join([]string{c.String(), c.GoString()}, " "); strings.Contains(s, "s3cr3t") {
 		t.Fatal("credentials printed")
 	}
+	rel := write("rel.json", `{"api_key":"k","ed25519_private_key_file":"key.pem"}`, 0o600)
+	if c, err = LoadCredentials(rel); err != nil || c.Ed25519PEM == nil {
+		t.Fatalf("relative key path must resolve against the credentials directory: %v", err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(hmac, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCredentials(link); err == nil {
+		t.Fatal("symlinked credentials file must be rejected")
+	}
 
 	openPEM := write("open.pem", "x", 0o644)
 	tests := []struct {
@@ -221,6 +236,8 @@ func TestLoadCredentials(t *testing.T) {
 		{"no api key", write("nokey.json", `{"secret_key":"s3cr3t"}`, 0o600), nil},
 		{"unknown field", write("extra.json", `{"api_key":"k","secret_key":"s3cr3t","x":1}`, 0o600), nil},
 		{"not json", write("bad.json", `api_key=s3cr3t`, 0o600), nil},
+		{"trailing data", write("trail.json", `{"api_key":"k","secret_key":"s3cr3t"} {"x":"s3cr3t"}`, 0o600), nil},
+		{"directory", dir, nil},
 		{"missing file", filepath.Join(dir, "none.json"), os.ErrNotExist},
 	}
 	for _, tc := range tests {

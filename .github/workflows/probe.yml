@@ -1,0 +1,31 @@
+# Measures whether Binance hosts answer from a GitHub-hosted runner. Binance
+# blocks some locations (HTTP 451 is reported by users for US IPs); this
+# records the observed status codes so the plan does not rely on guesses.
+# It never sends credentials and never fails the pipeline.
+name: binance-reachability-probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: probe public endpoints
+        run: |
+          for url in \
+            https://data-api.binance.vision/api/v3/time \
+            https://api.binance.com/api/v3/time \
+            https://demo-api.binance.com/api/v3/time \
+            https://testnet.binance.vision/api/v3/time \
+            https://data.binance.vision/; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$url" || echo ERR)"
+            echo "$url -> $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

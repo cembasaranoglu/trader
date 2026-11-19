@@ -11,9 +11,13 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      # Actions are pinned to commit SHAs; the comment names the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -28,9 +32,17 @@ jobs:
           git diff --exit-code go.mod go.sum
       - name: vet
         run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
       - name: test
         run: go test -race ./...
       - name: build
         run: go build ./...
       - name: validate example config
         run: go run ./cmd/traderd -config configs/example.yaml
+      - name: schema is generated from the example
+        run: |
+          python3 -m pip install --user --quiet 'PyYAML==6.0.2'
+          python3 scripts/gen_schema.py configs/example.yaml | diff -u configs/schema.json -

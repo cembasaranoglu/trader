@@ -5,11 +5,11 @@
 mode: paper                     # paper | live_small | live_full
 
 venue:
-  primary: binance              # D-17: binance.com (binance_tr also supported)
+  primary: binance              # D-17: binance.com (only supported primary venue)
   secondary: btcturk
   secondary_enabled: false      # BtcTurk adapter arrives in W9
 
-quote_currency: USDT            # binance: USDT, binance_tr: TRY
+quote_currency: USDT            # binance.com USDT pairs
 
 capital:
   planned_usd: 200

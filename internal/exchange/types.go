@@ -6,6 +6,7 @@ package exchange
 import (
 	"fmt"
 	"math/big"
+	"regexp"
 	"time"
 )
 
@@ -25,7 +26,10 @@ type Symbol struct {
 }
 
 // Filters are the exchange-side order rules for a symbol. A nil field means
-// the exchange did not publish that filter.
+// the rule is not in force: either the exchange did not publish it or it
+// published 0, which Binance documents as "disabled" for PRICE_FILTER values.
+// A symbol with a nil TickSize or StepSize must not be traded, because prices
+// and quantities cannot be rounded to a valid grid.
 type Filters struct {
 	TickSize    *big.Rat
 	MinPrice    *big.Rat
@@ -34,8 +38,11 @@ type Filters struct {
 	MinQty      *big.Rat
 	MaxQty      *big.Rat
 	MinNotional *big.Rat
+	MaxNotional *big.Rat
 	// NotionalAppliesToMarket reports whether MinNotional also applies to MARKET orders.
 	NotionalAppliesToMarket bool
+	// MaxNotionalAppliesToMarket reports whether MaxNotional also applies to MARKET orders.
+	MaxNotionalAppliesToMarket bool
 }
 
 // Level is one price level of an order book.
@@ -104,8 +111,22 @@ type Balance struct {
 	Locked *big.Rat
 }
 
-// ParseDecimal parses a decimal string such as "0.00000100" exactly.
+// MaxDecimalLen bounds the length of a decimal string accepted by ParseDecimal.
+const MaxDecimalLen = 64
+
+// decimalPattern is the plain non-negative decimal form exchanges publish,
+// e.g. "0.00000100". Signs, exponents, fractions ("1/3"), hex and
+// leading/trailing dots are rejected; big.Rat.SetString accepts all of them.
+var decimalPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
+// ParseDecimal parses a non-negative plain decimal string exactly.
 func ParseDecimal(s string) (*big.Rat, error) {
+	if len(s) > MaxDecimalLen {
+		return nil, fmt.Errorf("exchange: decimal longer than %d characters", MaxDecimalLen)
+	}
+	if !decimalPattern.MatchString(s) {
+		return nil, fmt.Errorf("exchange: invalid decimal %q", s)
+	}
 	r, ok := new(big.Rat).SetString(s)
 	if !ok {
 		return nil, fmt.Errorf("exchange: invalid decimal %q", s)

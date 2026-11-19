@@ -3,7 +3,14 @@
 // the signed account endpoint and API key permissions. It does not place orders.
 //
 // Public market data is read from the market-data-only host
-// (data-api.binance.vision); signed endpoints use api.binance.com.
+// (data-api.binance.vision); signed endpoints and the clock used for request
+// timestamps use api.binance.com.
+//
+// Transport rules: base URLs must be https (plain http only for loopback test
+// servers), redirects are never followed, every body is size-limited, and a
+// JSON null body is an error. One rate-limit backoff state is shared by both
+// hosts: after a 429/418 on either host the client refuses all requests until
+// Retry-After passes. This is deliberately conservative.
 package binance
 
 import (
@@ -25,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cembasaranoglu/trader/internal/exchange/httpx"
 )
 
 // Default hosts and limits.
@@ -34,8 +43,9 @@ const (
 	DefaultRecvWindow     = 5 * time.Second
 	DefaultRequestTimeout = 10 * time.Second
 	// MaxBodyBytes bounds every response body (exchangeInfo for all symbols is the largest).
-	MaxBodyBytes      = 16 << 20
-	defaultRetryAfter = 60 * time.Second
+	MaxBodyBytes = 16 << 20
+	// MaxRecvWindow is the largest recvWindow Binance accepts.
+	MaxRecvWindow = 60 * time.Second
 )
 
 // Sentinel errors for classification with errors.Is.
@@ -46,6 +56,8 @@ var (
 	ErrAPI              = errors.New("binance: api error")
 	ErrResponseTooLarge = errors.New("binance: response too large")
 	ErrNoCredentials    = errors.New("binance: credentials required")
+	ErrBadResponse      = errors.New("binance: malformed response")
+	ErrClockSkew        = errors.New("binance: clock skew too large")
 )
 
 // RateLimitError reports HTTP 429 (back off) or 418 (IP banned).
@@ -54,6 +66,7 @@ type RateLimitError struct {
 	RetryAfter time.Duration
 }
 
+// Error implements error.
 func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("binance: rate limited (HTTP %d), retry after %s", e.Status, e.RetryAfter)
 }
@@ -65,6 +78,7 @@ func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 // is unknown and must be reconciled by a query.
 type ServerError struct{ Status int }
 
+// Error implements error.
 func (e *ServerError) Error() string {
 	return fmt.Sprintf("binance: HTTP %d, outcome unknown", e.Status)
 }
@@ -79,6 +93,7 @@ type APIError struct {
 	Msg        string
 }
 
+// Error implements error.
 func (e *APIError) Error() string {
 	return fmt.Sprintf("binance: HTTP %d code %d: %s", e.HTTPStatus, e.Code, e.Msg)
 }
@@ -103,17 +118,18 @@ func NewHMACSigner(secret string) (*HMACSigner, error) {
 }
 
 // Sign implements Signer.
-func (s *HMACSigner) Sign(payload string) (string, error) {
+func (s HMACSigner) Sign(payload string) (string, error) {
 	m := hmac.New(sha256.New, s.secret)
 	m.Write([]byte(payload))
 	return hex.EncodeToString(m.Sum(nil)), nil
 }
 
 // String redacts the secret.
-func (s *HMACSigner) String() string { return "binance.HMACSigner{redacted}" }
+// It uses a value receiver so that printing a dereferenced signer is redacted too.
+func (s HMACSigner) String() string { return "binance.HMACSigner{redacted}" }
 
 // GoString redacts the secret.
-func (s *HMACSigner) GoString() string { return s.String() }
+func (s HMACSigner) GoString() string { return s.String() }
 
 // Ed25519Signer signs with an Ed25519 private key (base64 output), the key
 // type Binance recommends.
@@ -145,15 +161,15 @@ func NewEd25519SignerFromPEM(data []byte) (*Ed25519Signer, error) {
 }
 
 // Sign implements Signer.
-func (s *Ed25519Signer) Sign(payload string) (string, error) {
+func (s Ed25519Signer) Sign(payload string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ed25519.Sign(s.key, []byte(payload))), nil
 }
 
 // String redacts the key.
-func (s *Ed25519Signer) String() string { return "binance.Ed25519Signer{redacted}" }
+func (s Ed25519Signer) String() string { return "binance.Ed25519Signer{redacted}" }
 
 // GoString redacts the key.
-func (s *Ed25519Signer) GoString() string { return s.String() }
+func (s Ed25519Signer) GoString() string { return s.String() }
 
 // Credentials authenticate signed endpoints.
 type Credentials struct {
@@ -171,45 +187,42 @@ func (c Credentials) GoString() string { return c.String() }
 type Options struct {
 	BaseURL       string
 	MarketDataURL string
-	HTTPClient    *http.Client
-	Credentials   *Credentials
-	RecvWindow    time.Duration
-	Now           func() time.Time
+	// HTTPClient is copied; the copy never follows redirects. A nil value
+	// selects a client with DefaultRequestTimeout.
+	HTTPClient  *http.Client
+	Credentials *Credentials
+	RecvWindow  time.Duration
+	// MaxClockSkew is the largest local-vs-server clock offset SyncTime
+	// accepts. Zero disables the check.
+	MaxClockSkew time.Duration
+	Now          func() time.Time
 }
 
 // Client is safe for concurrent use.
 type Client struct {
-	http       *http.Client
-	base       *url.URL
-	market     *url.URL
-	creds      *Credentials
-	recvWindow time.Duration
-	now        func() time.Time
+	http         *http.Client
+	base         *url.URL
+	market       *url.URL
+	creds        *Credentials
+	recvWindow   time.Duration
+	maxClockSkew time.Duration
+	now          func() time.Time
 
 	mu           sync.Mutex
 	blockedUntil time.Time
+	offset       time.Duration // server minus local clock, set by SyncTime
 	usage        map[string]string
 }
 
 // New returns a Client.
 func New(opts Options) (*Client, error) {
-	parse := func(name, raw, def string) (*url.URL, error) {
-		if raw == "" {
-			raw = def
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return nil, fmt.Errorf("binance: invalid %s %q", name, raw)
-		}
-		return u, nil
-	}
-	base, err := parse("BaseURL", opts.BaseURL, DefaultBaseURL)
+	base, err := httpx.ParseBaseURL("BaseURL", opts.BaseURL, DefaultBaseURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance: %w", err)
 	}
-	market, err := parse("MarketDataURL", opts.MarketDataURL, DefaultMarketDataURL)
+	market, err := httpx.ParseBaseURL("MarketDataURL", opts.MarketDataURL, DefaultMarketDataURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance: %w", err)
 	}
 	if c := opts.Credentials; c != nil && (c.APIKey == "" || c.Signer == nil) {
 		return nil, errors.New("binance: credentials need an API key and a signer")
@@ -218,19 +231,62 @@ func New(opts Options) (*Client, error) {
 	if rw == 0 {
 		rw = DefaultRecvWindow
 	}
-	if rw < 0 || rw > 60*time.Second {
-		return nil, fmt.Errorf("binance: recvWindow must be in (0, 60s], got %s", rw)
+	if rw < time.Millisecond || rw > MaxRecvWindow {
+		return nil, fmt.Errorf("binance: recvWindow must be in [1ms, %s], got %s", MaxRecvWindow, rw)
 	}
-	hc := opts.HTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: DefaultRequestTimeout}
+	if opts.MaxClockSkew < 0 {
+		return nil, fmt.Errorf("binance: MaxClockSkew must not be negative, got %s", opts.MaxClockSkew)
 	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Client{http: hc, base: base, market: market, creds: opts.Credentials,
-		recvWindow: rw, now: now, usage: make(map[string]string)}, nil
+	return &Client{http: httpx.NoRedirectClient(opts.HTTPClient, DefaultRequestTimeout), base: base, market: market,
+		creds: opts.Credentials, recvWindow: rw, maxClockSkew: opts.MaxClockSkew, now: now,
+		usage: make(map[string]string)}, nil
+}
+
+// BlockedUntil returns the end of the current rate-limit backoff, or the zero
+// time when the client is not backing off.
+func (c *Client) BlockedUntil() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.blockedUntil
+}
+
+// ClockOffset returns the last offset measured by SyncTime (server minus
+// local). Signed requests add it to the local clock.
+func (c *Client) ClockOffset() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.offset
+}
+
+// SyncTime measures the offset between the local clock and the signing
+// host's clock, using the midpoint of the request round trip, and stores it
+// for signed requests. When MaxClockSkew is set and the absolute offset
+// exceeds it, the offset is not stored and an error wrapping ErrClockSkew is
+// returned: the host clock must be fixed (NTP), not papered over.
+func (c *Client) SyncTime(ctx context.Context) (time.Duration, error) {
+	start := c.now()
+	server, err := c.ServerTime(ctx)
+	if err != nil {
+		return 0, err
+	}
+	end := c.now()
+	mid := start.Add(end.Sub(start) / 2)
+	off := server.Sub(mid)
+	abs := off
+	if abs < 0 {
+		abs = -abs
+	}
+	if c.maxClockSkew > 0 && abs > c.maxClockSkew {
+		return off, fmt.Errorf("%w: offset %s exceeds %s", ErrClockSkew, off, c.maxClockSkew)
+	}
+	c.mu.Lock()
+	c.offset = off
+	c.mu.Unlock()
+	return off, nil
 }
 
 // Usage returns a copy of the last rate-limit usage headers seen.
@@ -265,7 +321,7 @@ func (c *Client) get(ctx context.Context, r request, dst any) error {
 		if c.creds == nil {
 			return ErrNoCredentials
 		}
-		q.Set("timestamp", strconv.FormatInt(c.now().UnixMilli(), 10))
+		q.Set("timestamp", strconv.FormatInt(c.now().Add(c.ClockOffset()).UnixMilli(), 10))
 		q.Set("recvWindow", strconv.FormatInt(c.recvWindow.Milliseconds(), 10))
 		payload := q.Encode()
 		sig, err := c.creds.Signer.Sign(payload)
@@ -304,9 +360,11 @@ func (c *Client) get(ctx context.Context, r request, dst any) error {
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusTeapot:
-		ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+		ra := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
 		c.setBackoff(ra)
 		return &RateLimitError{Status: resp.StatusCode, RetryAfter: ra}
+	case resp.StatusCode >= 300 && resp.StatusCode <= 399:
+		return fmt.Errorf("binance: GET %s: HTTP %d: %w", r.path, resp.StatusCode, httpx.ErrRedirect)
 	case resp.StatusCode >= 500:
 		return &ServerError{Status: resp.StatusCode}
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
@@ -319,8 +377,11 @@ func (c *Client) get(ctx context.Context, r request, dst any) error {
 		}
 		return &APIError{HTTPStatus: resp.StatusCode, Code: e.Code, Msg: e.Msg}
 	}
+	if httpx.IsNullJSON(body) {
+		return fmt.Errorf("%w: %s: null body", ErrBadResponse, r.path)
+	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		return fmt.Errorf("binance: decode %s: %w", r.path, err)
+		return fmt.Errorf("%w: %s: %v", ErrBadResponse, r.path, err)
 	}
 	return nil
 }
@@ -353,19 +414,11 @@ func (c *Client) recordUsage(h http.Header) {
 	}
 }
 
-func parseRetryAfter(v string) time.Duration {
-	s, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || s <= 0 {
-		return defaultRetryAfter
-	}
-	return time.Duration(s) * time.Second
-}
-
 func snippet(b []byte) string {
-	const max = 256
-	s := strings.TrimSpace(string(b))
-	if len(s) > max {
-		s = s[:max] + "…"
+	const limit = 256
+	s := strings.ToValidUTF8(strings.TrimSpace(string(b)), "?")
+	if len(s) > limit {
+		s = strings.ToValidUTF8(s[:limit], "") + "…"
 	}
 	return s
 }

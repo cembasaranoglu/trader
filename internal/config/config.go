@@ -65,8 +65,8 @@ type Venue struct {
 	SecondaryEnabled bool
 }
 
-// Capital holds capital sizing in USD. Conversion to the quote currency uses
-// the USD/TRY rate recorded at run time.
+// Capital holds capital sizing in USD. The quote currency is USDT; it is
+// treated as USD only while the depeg guard (Risk.FXShockPct) passes.
 type Capital struct {
 	PlannedUSD      float64
 	LiveSmallMaxUSD float64
