@@ -50,6 +50,10 @@ marketdata:
   kline_intervals: [1m, 1h, 4h, 1d]   # initial set; W3 research may change it
   reconnect_max_backoff_s: 60
 
+store:
+  path: data/trader.db          # anchor file is written next to it (trader.db.anchor)
+  backup_dir: data/backups
+
 llm:
   cost_cap_pct_of_capital: 1    # D-13: live cap = this % of current capital per month
   rnd_monthly_cap_usd: 50       # D-16: paper / R&D cap

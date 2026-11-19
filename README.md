@@ -2,7 +2,7 @@
 
 LLM destekli, kripto spot piyasasında (binance.com, USDT pariteleri) çalışan bir işlem sistemi. LLM ajanları yalnızca şemalı öneri üretir. Emirlere deterministik Go çekirdeğindeki risk motoru karar verir.
 
-> **Durum:** W1a tamam, W1b (WebSocket piyasa verisi) kodlandı; canlı 24 saatlik doğrulama bekliyor. Konfigürasyon doğrulayıcı, binance.com salt okuma REST istemcisi (saat senkronu, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri), `venuecheck` tanı aracı ve WebSocket piyasa verisi (`traderd observe`) var. Emir gönderme, depolama ve LLM katmanı **yok**. Sistem para ile işlem yapmaz. Sıradaki işler: [docs/plan/01-waves.md](docs/plan/01-waves.md).
+> **Durum:** W1a tamam; W1b (WebSocket piyasa verisi) ve W1c (depolama, ön kontrol) kodlandı, canlı doğrulama bekliyor. Konfigürasyon doğrulayıcı, binance.com salt okuma REST istemcisi (saat senkronu, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri), `venuecheck` tanı aracı ve WebSocket piyasa verisi (`traderd observe`) var. Hash zincirli olay günlüğü ve başlangıç ön kontrolü (`traderd preflight`) var. Emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz. Sıradaki işler: [docs/plan/01-waves.md](docs/plan/01-waves.md).
 >
 > Bu yazılım yatırım tavsiyesi değildir. Kâr garantisi yoktur.
 
@@ -58,6 +58,18 @@ go run ./cmd/traderd observe -config configs/example.yaml -symbols BTCUSDT,ETHUS
 ```
 
 Son satır `"type":"final"` özetidir; aynı özet ekrana da yazılır. Ctrl-C ile erken durdurulursa özet `"interrupted":true` ile yazılır.
+
+## Başlangıç ön kontrolü ve depolama
+
+`traderd preflight` işlem süreci başlamadan önce şunları borsadan doğrular: saat farkı (R-20), API anahtarında çekim yetkisinin kapalı olması ve ek yetki bulunmaması (I-7), işlem yetkisi varsa IP kısıtının açık olması, seçilen STP modunun her sembolde izinli olması (R-22) ve olay günlüğünün hash zincirinin sağlam olması. Bir kontrol bile başarısızsa çıkış kodu 1'dir.
+
+```sh
+go run ./cmd/traderd preflight -config configs/example.yaml -credentials ~/.config/trader/binance.json -symbols BTCUSDT,ETHUSDT
+go run ./cmd/traderd store verify -config configs/example.yaml
+go run ./cmd/traderd store backup -config configs/example.yaml
+```
+
+Ayrıntılar ve geri yükleme adımları: [docs/runbook/storage.md](docs/runbook/storage.md).
 
 ## Konfigürasyon
 

@@ -30,6 +30,12 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      - name: modernc libc version matches the sqlite driver (ADR-006)
+        run: |
+          want="$(go mod graph | awk '$1 ~ /^modernc.org\/sqlite@/ && $2 ~ /^modernc.org\/libc@/ {split($2, a, "@"); print a[2]; exit}')"
+          have="$(go list -m -f '{{.Version}}' modernc.org/libc)"
+          echo "sqlite wants libc $want, module uses $have"
+          test -n "$want" && test "$want" = "$have"
       - name: vet
         run: go vet ./...
       - name: staticcheck

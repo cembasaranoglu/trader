@@ -14,6 +14,7 @@
     "execution",
     "ops",
     "marketdata",
+    "store",
     "llm",
     "agents",
     "learning",
@@ -297,6 +298,24 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 300
+        }
+      }
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "backup_dir"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^\\S(.*\\S)?$"
+        },
+        "backup_dir": {
+          "type": "string",
+          "pattern": "^\\S(.*\\S)?$"
         }
       }
     },

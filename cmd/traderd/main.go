@@ -5,6 +5,9 @@
 //	traderd [validate] -config <file>          validate the configuration (default)
 //	traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]
 //	                                           stream market data and report its health
+//	traderd preflight -config <file> -credentials <file> -symbols A,B [-environment live|demo]
+//	                                           run the start-up safety checks
+//	traderd store verify|backup -config <file>  verify or back up the event log
 //
 // The trading runtime is added wave by wave (docs/plan/01-waves.md).
 // Exit codes: 0 success, 1 failure (invalid configuration, setup error),
@@ -33,7 +36,9 @@ func main() {
 
 const usage = `usage:
   traderd [validate] -config <file>
-  traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]`
+  traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]
+  traderd preflight -config <file> -credentials <file> -symbols A,B [-environment live|demo]
+  traderd store verify|backup -config <file>`
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	cmd := "validate"
@@ -45,6 +50,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runValidate(args, stdout, stderr)
 	case "observe":
 		return runObserve(ctx, args, stdout, stderr)
+	case "preflight":
+		return runPreflight(ctx, args, stdout, stderr)
+	case "store":
+		return runStore(ctx, args, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s\n", cmd, usage)
 		return 2

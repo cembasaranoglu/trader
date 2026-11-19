@@ -20,6 +20,7 @@ type rawConfig struct {
 	Execution     *rawExecution  `yaml:"execution"`
 	Ops           *rawOps        `yaml:"ops"`
 	MarketData    *rawMarketData `yaml:"marketdata"`
+	Store         *rawStore      `yaml:"store"`
 	LLM           *rawLLM        `yaml:"llm"`
 	Agents        *rawAgents     `yaml:"agents"`
 	Learning      *rawLearning   `yaml:"learning"`
@@ -77,6 +78,11 @@ type rawMarketData struct {
 	DepthLimit          *yamlInt  `yaml:"depth_limit"`
 	KlineIntervals      *[]string `yaml:"kline_intervals"`
 	ReconnectMaxBackoff *yamlInt  `yaml:"reconnect_max_backoff_s"`
+}
+
+type rawStore struct {
+	Path      *string `yaml:"path"`
+	BackupDir *string `yaml:"backup_dir"`
 }
 
 type rawLLM struct {

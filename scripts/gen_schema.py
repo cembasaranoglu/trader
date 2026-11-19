@@ -37,6 +37,8 @@ C = {
  "marketdata.kline_intervals": {"type": "array", "minItems": 1, "uniqueItems": True,
      "items": {"enum": ["1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]}},
  "marketdata.reconnect_max_backoff_s": {"type": "integer", "minimum": 1, "maximum": 300},
+ "store.path": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
+ "store.backup_dir": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
  "llm.cost_cap_pct_of_capital": pct, "llm.rnd_monthly_cap_usd": usd,
  "llm.models.routine": {"type": "string", "pattern": "^\\S(.*\\S)?$"}, "llm.models.synthesis": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
  "learning.min_supporting_trades": {"type": "integer", "minimum": 1, "maximum": 100000},

@@ -53,6 +53,7 @@ type Config struct {
 	Execution     Execution
 	Ops           Ops
 	MarketData    MarketData
+	Store         Store
 	LLM           LLM
 	Agents        Agents
 	Learning      Learning
@@ -118,6 +119,13 @@ type MarketData struct {
 	DepthLimit          int           // REST depth snapshot levels, 1..5000
 	KlineIntervals      []string      // streamed kline intervals, unique
 	ReconnectMaxBackoff time.Duration // upper bound of the stream reconnect delay
+}
+
+// Store locates the database and its backups (W1c). Relative paths are
+// relative to the process working directory.
+type Store struct {
+	Path      string
+	BackupDir string
 }
 
 // KlineIntervals are the intervals Binance spot supports (enums.md).

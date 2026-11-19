@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cembasaranoglu/trader/internal/credentials"
 	"github.com/cembasaranoglu/trader/internal/exchange"
 	"github.com/cembasaranoglu/trader/internal/exchange/binance"
 	"github.com/cembasaranoglu/trader/internal/exchange/binancetr"
@@ -78,9 +79,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	var creds *venuecheck.Credentials
+	var creds *credentials.Credentials
 	if *credPath != "" {
-		c, err := venuecheck.LoadCredentials(*credPath)
+		c, err := credentials.Load(*credPath)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -141,22 +142,16 @@ func writeReport(rep *venuecheck.Report, path string, stdout io.Writer) (err err
 	return enc.Encode(rep)
 }
 
-func newVenue(name, baseURL, marketURL string, creds *venuecheck.Credentials) (venuecheck.Venue, error) {
+func newVenue(name, baseURL, marketURL string, creds *credentials.Credentials) (venuecheck.Venue, error) {
 	switch name {
 	case "binance":
 		opts := binance.Options{BaseURL: baseURL, MarketDataURL: marketURL}
 		if creds != nil {
-			var signer binance.Signer
-			var err error
-			if creds.SecretKey != "" {
-				signer, err = binance.NewHMACSigner(creds.SecretKey)
-			} else {
-				signer, err = binance.NewEd25519SignerFromPEM(creds.Ed25519PEM)
-			}
+			bc, err := creds.Binance()
 			if err != nil {
 				return nil, err
 			}
-			opts.Credentials = &binance.Credentials{APIKey: creds.APIKey, Signer: signer}
+			opts.Credentials = bc
 		}
 		c, err := binance.New(opts)
 		if err != nil {

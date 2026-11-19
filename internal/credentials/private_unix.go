@@ -1,6 +1,6 @@
 //go:build unix
 
-package venuecheck
+package credentials
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 
 // ErrCredentialsFileOwner is returned when a credentials or key file is not
 // owned by the user running the process.
-var ErrCredentialsFileOwner = errors.New("venuecheck: credentials and key files must be owned by the current user")
+var ErrCredentialsFileOwner = errors.New("credentials: credentials and key files must be owned by the current user")
 
 // checkPrivate requires owner-only permissions and ownership by the current user.
 func checkPrivate(_ string, st os.FileInfo) ([]string, error) {
@@ -19,7 +19,7 @@ func checkPrivate(_ string, st os.FileInfo) ([]string, error) {
 	}
 	sys, ok := st.Sys().(*syscall.Stat_t)
 	if !ok {
-		return nil, errors.New("venuecheck: cannot read file owner")
+		return nil, errors.New("credentials: cannot read file owner")
 	}
 	if int(sys.Uid) != os.Geteuid() {
 		return nil, ErrCredentialsFileOwner

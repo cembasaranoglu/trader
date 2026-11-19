@@ -1,6 +1,6 @@
 //go:build !unix
 
-package venuecheck
+package credentials
 
 import "os"
 

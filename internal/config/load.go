@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -208,6 +209,19 @@ func (c *checker) nonBlank(path string, p *string) string {
 	return *p
 }
 
+// filePath returns a non-blank, cleaned path without NUL bytes.
+func (c *checker) filePath(path string, p *string) string {
+	v := c.nonBlank(path, p)
+	if v == "" {
+		return ""
+	}
+	if strings.ContainsRune(v, 0) || len(v) > 4096 {
+		c.invalid(path, "must be a valid path")
+		return ""
+	}
+	return filepath.Clean(v)
+}
+
 // Sanity bounds. They prevent overflow and nonsensical values; they are not
 // risk policy (risk values come from D-16 in the example config).
 const (
@@ -283,6 +297,16 @@ func (c *checker) build(r *rawConfig) *Config {
 				seen[iv] = true
 			}
 			cfg.MarketData.KlineIntervals = slices.Clone(ivs)
+		}
+	}
+	if present(c, "store", r.Store) {
+		cfg.Store = Store{
+			Path:      c.filePath("store.path", r.Store.Path),
+			BackupDir: c.filePath("store.backup_dir", r.Store.BackupDir),
+		}
+		if cfg.Store.Path != "" && cfg.Store.BackupDir != "" &&
+			filepath.Clean(filepath.Dir(cfg.Store.Path)) == filepath.Clean(cfg.Store.BackupDir) {
+			c.invalid("store.backup_dir", "must differ from the database directory")
 		}
 	}
 	if present(c, "llm", r.LLM) {
