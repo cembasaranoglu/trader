@@ -22,7 +22,7 @@ func TestRun(t *testing.T) {
 		wantStdout string
 		wantStderr string
 	}{
-		{"valid example", []string{"-config", "../../configs/example.yaml"}, 0, "configuration ok: mode=paper", ""},
+		{"valid example", []string{"-config", "../../configs/example.yaml"}, 0, "configuration ok: mode=paper venue=binance quote=USDT", ""},
 		{"missing flag", nil, 2, "", "usage: traderd -config <file>"},
 		{"extra argument", []string{"-config", "x.yaml", "extra"}, 2, "", "usage:"},
 		{"unknown flag", []string{"-nope"}, 2, "", "flag provided but not defined"},

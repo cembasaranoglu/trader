@@ -37,6 +37,7 @@
       "properties": {
         "primary": {
           "enum": [
+            "binance",
             "binance_tr"
           ]
         },
@@ -54,8 +55,10 @@
     },
     "quote_currency": {
       "enum": [
+        "USDT",
         "TRY"
-      ]
+      ],
+      "description": "binance: USDT, binance_tr: TRY (checked by the loader)"
     },
     "capital": {
       "type": "object",

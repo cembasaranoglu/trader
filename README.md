@@ -1,8 +1,8 @@
 # trader
 
-LLM destekli, kripto spot piyasasında (Binance TR, TRY pariteleri) çalışan bir işlem sistemi. LLM ajanları yalnızca şemalı öneri üretir. Emirlere deterministik Go çekirdeğindeki risk motoru karar verir.
+LLM destekli, kripto spot piyasasında (binance.com, USDT pariteleri) çalışan bir işlem sistemi. LLM ajanları yalnızca şemalı öneri üretir. Emirlere deterministik Go çekirdeğindeki risk motoru karar verir.
 
-> **Durum:** Wave W1a. Konfigürasyon doğrulayıcı ve Binance TR için salt okuma istemcisi (saat, sembol kuralları, piyasa verisi, hesap bayrakları) var. Emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz.
+> **Durum:** Wave W1. Konfigürasyon doğrulayıcı ve binance.com ile Binance TR için salt okuma istemcileri (saat, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri) var. Emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz.
 >
 > Bu yazılım yatırım tavsiyesi değildir. Kâr garantisi yoktur.
 
@@ -21,27 +21,31 @@ go build ./cmd/traderd
 
 Çıkış kodları: `0` konfigürasyon geçerli, `1` geçersiz (her sorun ayrı satırda listelenir), `2` kullanım hatası.
 
-## Binance TR doğrulaması (`venuecheck`)
+## Borsa doğrulaması (`venuecheck`)
 
-`venuecheck`, dokümandan doğrulanamayan Binance TR bilgilerini canlı API'de ölçer ve paylaşılabilir bir JSON rapor üretir. Raporda sır ve bakiye tutarı yoktur. Varsayılan ayarlarla en fazla 11 istek yapar, istekler arasında 250 ms bekler.
+`venuecheck`, dokümandan doğrulanamayan borsa bilgilerini canlı API'de ölçer ve paylaşılabilir bir JSON rapor üretir. Raporda sır ve bakiye tutarı yoktur. İstekler arasında 250 ms bekler.
 
-Yalnızca herkese açık veri:
+Yalnızca herkese açık veri (anahtar gerekmez):
 
 ```sh
-go run ./cmd/venuecheck -symbols BTC_TRY,ETH_TRY -out venuecheck-report.json
+go run ./cmd/venuecheck -out venuecheck-report.json            # binance.com (varsayılan)
+go run ./cmd/venuecheck -venue binance_tr -out venuecheck-report.json
 ```
 
-Hesap bayraklarını da ölçmek için (yalnız okuma yetkili anahtar):
+Hesap bayrakları ve anahtar yetkileri için **yalnız okuma** yetkili bir anahtarla:
 
 ```sh
 mkdir -p ~/.config/trader
-# Dosyayı bir editörle oluştur; anahtarı terminal geçmişine yazma:
-#   {"api_key": "...", "secret_key": "..."}
-chmod 600 ~/.config/trader/binance_tr.json
-go run ./cmd/venuecheck -credentials ~/.config/trader/binance_tr.json -out venuecheck-report.json
+# Dosyayı bir editörle oluştur; anahtarı terminal geçmişine yazma.
+# HMAC anahtarı:    {"api_key": "...", "secret_key": "..."}
+# Ed25519 anahtarı: {"api_key": "...", "ed25519_private_key_file": "/home/<sen>/.config/trader/ed25519.pem"}
+chmod 600 ~/.config/trader/binance.json
+go run ./cmd/venuecheck -credentials ~/.config/trader/binance.json -out venuecheck-report.json
 ```
 
-Dosya grup veya diğer kullanıcılar tarafından okunabiliyorsa komut çalışmaz. Ayrıntılar: [docs/exchanges/binance-tr.md](docs/exchanges/binance-tr.md).
+binance.com'da anahtarın yetkileri (`/sapi/v1/account/apiRestrictions`) da okunur. Çekim yetkisi açıksa, IP kısıtlaması olmadan işlem yetkisi varsa ya da gereksiz başka bir yetki açıksa rapor `warnings` altında uyarır. Kimlik dosyası ve Ed25519 anahtar dosyası grup veya diğer kullanıcılar tarafından okunabiliyorsa komut çalışmaz. Şifreli (parolalı) Ed25519 anahtarları desteklenmez.
+
+Ayrıntılar: [docs/exchanges/binance.md](docs/exchanges/binance.md), [docs/exchanges/binance-tr.md](docs/exchanges/binance-tr.md).
 
 ## Konfigürasyon
 

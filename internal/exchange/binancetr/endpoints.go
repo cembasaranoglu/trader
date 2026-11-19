@@ -263,7 +263,7 @@ func parseKline(row []json.RawMessage) (exchange.Kline, error) {
 	return k, nil
 }
 
-// Account returns account flags, fiat commission rates and balances (signed).
+// Account returns account flags, fiat (TRY) commission rates and balances (signed).
 func (c *Client) Account(ctx context.Context) (exchange.AccountInfo, error) {
 	body, err := c.do(ctx, request{method: http.MethodGet, host: c.base, path: "/open/v1/account/spot", signed: true})
 	if err != nil {
@@ -297,7 +297,7 @@ func (c *Client) Account(ctx context.Context) (exchange.AccountInfo, error) {
 	for _, p := range []struct {
 		s   string
 		dst **big.Rat
-	}{{w.FiatMakerCommission, &info.FiatMakerRate}, {w.FiatTakerCommission, &info.FiatTakerRate}} {
+	}{{w.FiatMakerCommission, &info.MakerRate}, {w.FiatTakerCommission, &info.TakerRate}} {
 		if p.s == "" {
 			continue
 		}

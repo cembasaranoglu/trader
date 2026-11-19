@@ -1,0 +1,7 @@
+{"timezone":"UTC","serverTime":1700000000000,"rateLimits":[],"exchangeFilters":[],"symbols":[
+{"symbol":"BTCUSDT","status":"TRADING","baseAsset":"BTC","quoteAsset":"USDT","orderTypes":["LIMIT","LIMIT_MAKER","MARKET","STOP_LOSS_LIMIT","TAKE_PROFIT_LIMIT"],"ocoAllowed":true,"otoAllowed":true,"isSpotTradingAllowed":true,"defaultSelfTradePreventionMode":"EXPIRE_MAKER","allowedSelfTradePreventionModes":["EXPIRE_TAKER","EXPIRE_MAKER","EXPIRE_BOTH","DECREMENT"],
+ "filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01000000","maxPrice":"1000000.00000000","tickSize":"0.01000000"},{"filterType":"LOT_SIZE","minQty":"0.00001000","maxQty":"9000.00000000","stepSize":"0.00001000"},{"filterType":"NOTIONAL","minNotional":"5.00000000","applyMinToMarket":true,"maxNotional":"9000000.00000000","applyMaxToMarket":false,"avgPriceMins":5},{"filterType":"MAX_NUM_ORDERS","maxNumOrders":200}]},
+{"symbol":"OLDUSDT","status":"BREAK","baseAsset":"OLD","quoteAsset":"USDT","orderTypes":["LIMIT"],"ocoAllowed":false,"isSpotTradingAllowed":true,
+ "filters":[{"filterType":"MIN_NOTIONAL","minNotional":"10.00000000","applyToMarket":true,"avgPriceMins":5}]},
+{"symbol":"ETHBTC","status":"TRADING","baseAsset":"ETH","quoteAsset":"BTC","orderTypes":["LIMIT"],"ocoAllowed":true,"isSpotTradingAllowed":true,"filters":[]}
+]}

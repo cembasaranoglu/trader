@@ -306,7 +306,7 @@ func TestAccountSignsRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.CanTrade || !info.CanWithdraw || !eqRat(info.FiatTakerRate, rat(t, "0.0015")) || info.RawMakerCommission != "10.00000000" {
+	if !info.CanTrade || !info.CanWithdraw || !eqRat(info.TakerRate, rat(t, "0.0015")) || info.RawMakerCommission != "10.00000000" {
 		t.Fatalf("unexpected account: %+v", info)
 	}
 	if len(info.Balances) != 2 || !eqRat(info.Balances[1].Locked, rat(t, "0.0001")) {

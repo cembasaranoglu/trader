@@ -85,8 +85,8 @@ func TestLoadFileExample(t *testing.T) {
 		got, want any
 	}{
 		{"mode", cfg.Mode, config.ModePaper},
-		{"venue.primary", cfg.Venue.Primary, "binance_tr"},
-		{"quote", cfg.QuoteCurrency, "TRY"},
+		{"venue.primary", cfg.Venue.Primary, "binance"},
+		{"quote", cfg.QuoteCurrency, "USDT"},
 		{"max_drawdown", cfg.Risk.MaxDrawdownPct, 30.0},
 		{"on_max_dd", cfg.Risk.OnMaxDD, config.OnMaxDDCloseAll},
 		{"data_age", cfg.Risk.MaxDataAge, 5 * time.Second},
@@ -120,9 +120,10 @@ func TestLoadRejects(t *testing.T) {
 		{"missing bool is not treated as false", func(t *testing.T, m map[string]any) { del(t, m, "agents.critic.enabled") }, config.ErrMissing, "agents.critic.enabled"},
 		{"missing window", func(t *testing.T, m map[string]any) { del(t, m, "risk.max_entries_per_window.window") }, config.ErrMissing, "risk.max_entries_per_window.window"},
 		{"unknown mode", func(t *testing.T, m map[string]any) { set(t, m, "mode", "live") }, config.ErrInvalid, "mode"},
-		{"unsupported venue", func(t *testing.T, m map[string]any) { set(t, m, "venue.primary", "binance") }, config.ErrInvalid, "venue.primary"},
+		{"unsupported venue", func(t *testing.T, m map[string]any) { set(t, m, "venue.primary", "kraken") }, config.ErrInvalid, "venue.primary"},
 		{"secondary venue before W9", func(t *testing.T, m map[string]any) { set(t, m, "venue.secondary_enabled", true) }, config.ErrInvalid, "venue.secondary_enabled"},
-		{"non-TRY quote", func(t *testing.T, m map[string]any) { set(t, m, "quote_currency", "USDT") }, config.ErrInvalid, "quote_currency"},
+		{"unsupported quote", func(t *testing.T, m map[string]any) { set(t, m, "quote_currency", "EUR") }, config.ErrInvalid, "quote_currency"},
+		{"quote does not match venue", func(t *testing.T, m map[string]any) { set(t, m, "quote_currency", "TRY") }, config.ErrInvalid, "quote_currency"},
 		{"drawdown below D-11 floor", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_drawdown_pct", 29.9) }, config.ErrInvalid, "risk.max_drawdown_pct"},
 		{"drawdown above 100", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_drawdown_pct", 101) }, config.ErrInvalid, "risk.max_drawdown_pct"},
 		{"zero daily loss", func(t *testing.T, m map[string]any) { set(t, m, "risk.max_daily_loss_pct", 0) }, config.ErrInvalid, "risk.max_daily_loss_pct"},
@@ -185,6 +186,17 @@ func hasFieldError(err error, path string, sentinel error) bool {
 		}
 	}
 	return false
+}
+
+func TestLoadAcceptsBinanceTR(t *testing.T) {
+	t.Parallel()
+	m := exampleMap(t)
+	set(t, m, "venue.primary", "binance_tr")
+	set(t, m, "quote_currency", "TRY")
+	cfg, err := config.Load(bytes.NewReader(marshal(t, m)))
+	if err != nil || cfg.Venue.Primary != "binance_tr" || cfg.QuoteCurrency != "TRY" {
+		t.Fatalf("binance_tr/TRY must load: %v", err)
+	}
 }
 
 func TestLoadReportsEveryProblem(t *testing.T) {

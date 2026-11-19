@@ -1,6 +1,6 @@
-// Package venuecheck measures the live Binance TR facts that the design
-// documents could not verify (wave W1): clock skew, symbol rules for TRY
-// pairs, market-data response shapes, rate-limit headers and account flags.
+// Package venuecheck measures live exchange facts that documentation alone
+// cannot settle: clock skew, symbol rules, liquidity ranking, rate-limit
+// headers, account flags and API key permissions.
 //
 // The report contains no secrets and no balance amounts, so it can be shared.
 package venuecheck
@@ -13,38 +13,53 @@ import (
 	"time"
 
 	"github.com/cembasaranoglu/trader/internal/exchange"
-	"github.com/cembasaranoglu/trader/internal/exchange/binancetr"
 )
 
-// Venue is the subset of the Binance TR client that the check needs.
+// Venue is the read-side surface the check needs from an exchange adapter.
 type Venue interface {
 	ServerTime(ctx context.Context) (time.Time, error)
 	Symbols(ctx context.Context) ([]exchange.Symbol, error)
-	Depth(ctx context.Context, s exchange.Symbol, limit int) (exchange.OrderBook, binancetr.Shape, error)
-	Klines(ctx context.Context, s exchange.Symbol, interval string, limit int) ([]exchange.Kline, binancetr.Shape, error)
+	Depth(ctx context.Context, s exchange.Symbol, limit int) (exchange.OrderBook, error)
+	Klines(ctx context.Context, s exchange.Symbol, interval string, limit int) ([]exchange.Kline, error)
 	Account(ctx context.Context) (exchange.AccountInfo, error)
 	Usage() map[string]string
 }
 
+// TickerSource is implemented by venues that publish 24h tickers.
+type TickerSource interface {
+	Tickers24h(ctx context.Context) ([]exchange.Ticker, error)
+}
+
+// PermissionSource is implemented by venues that expose API key permissions.
+type PermissionSource interface {
+	KeyPermissions(ctx context.Context) (exchange.KeyPermissions, error)
+}
+
 // Options configures a check run.
 type Options struct {
-	Symbols      []string         // venue names to inspect, e.g. "BTC_TRY"
-	ClockSamples int              // server time samples; >= 1
-	CheckAccount bool             // call the signed account endpoint
-	Now          func() time.Time // nil: time.Now
-	// Pause between requests; keeps the check far below any rate limit.
-	Pause time.Duration
+	Venue        string   // label for the report, e.g. "binance"
+	Quote        string   // quote asset to summarize, e.g. "USDT"
+	Symbols      []string // venue names to inspect in detail
+	TopN         int      // size of the liquidity ranking; 0 disables it
+	ClockSamples int
+	CheckAccount bool // call signed endpoints
+	Now          func() time.Time
+	Pause        time.Duration // between requests
 }
 
 // Report is the shareable result of a check.
 type Report struct {
 	GeneratedAt      time.Time         `json:"generated_at"`
+	Venue            string            `json:"venue"`
 	Clock            *ClockReport      `json:"clock,omitempty"`
 	Symbols          *SymbolsSummary   `json:"symbols,omitempty"`
+	TopByQuoteVolume []TopSymbol       `json:"top_by_quote_volume_24h,omitempty"`
 	Watched          []SymbolReport    `json:"watched"`
 	RateLimitHeaders map[string]string `json:"rate_limit_headers"`
 	Account          *AccountReport    `json:"account,omitempty"`
+	KeyPermissions   *PermissionReport `json:"key_permissions,omitempty"`
 	AccountSkipped   string            `json:"account_skipped,omitempty"`
+	Warnings         []string          `json:"warnings"`
 	Errors           []string          `json:"errors"`
 	ManualChecks     []string          `json:"manual_checks"`
 }
@@ -56,21 +71,27 @@ type ClockReport struct {
 	MaxRTTMs       int64 `json:"max_rtt_ms"`
 }
 
-// SymbolsSummary counts symbols by quote and routing type.
+// SymbolsSummary counts symbols for the configured quote asset.
 type SymbolsSummary struct {
-	Total          int         `json:"total"`
-	ByType         map[int]int `json:"by_type"`
-	TRYQuoted      int         `json:"try_quoted"`
-	TRYSpotEnabled int         `json:"try_spot_enabled"`
-	TRYByType      map[int]int `json:"try_by_type"`
-	NonTRYQuoted   int         `json:"non_try_quoted"`
+	Total            int         `json:"total"`
+	Quote            string      `json:"quote"`
+	QuoteCount       int         `json:"quote_count"`
+	QuoteSpotEnabled int         `json:"quote_spot_enabled"`
+	ByType           map[int]int `json:"by_type,omitempty"` // only for venues with routing types
+}
+
+// TopSymbol is one entry of the 24h liquidity ranking.
+type TopSymbol struct {
+	Symbol         string `json:"symbol"`
+	QuoteVolume24h string `json:"quote_volume_24h"`
+	LastPrice      string `json:"last_price"`
 }
 
 // SymbolReport holds the measured rules and market data for one symbol.
 type SymbolReport struct {
 	Name                    string   `json:"name"`
 	Found                   bool     `json:"found"`
-	Type                    int      `json:"type,omitempty"`
+	Status                  string   `json:"status,omitempty"`
 	SpotEnabled             bool     `json:"spot_enabled,omitempty"`
 	OCOEnabled              bool     `json:"oco_enabled,omitempty"`
 	OrderTypes              []string `json:"order_types,omitempty"`
@@ -80,13 +101,11 @@ type SymbolReport struct {
 	StepSize                string   `json:"step_size,omitempty"`
 	MinQty                  string   `json:"min_qty,omitempty"`
 	MinNotional             string   `json:"min_notional,omitempty"`
-	NotionalAppliesToMarket bool     `json:"notional_applies_to_market,omitempty"`
-	DepthShape              string   `json:"depth_shape,omitempty"`
+	NotionalAppliesToMarket bool     `json:"notional_applies_to_market"`
 	BestBid                 string   `json:"best_bid,omitempty"`
 	BestAsk                 string   `json:"best_ask,omitempty"`
 	SpreadBps               *float64 `json:"spread_bps,omitempty"`
-	KlinesShape             string   `json:"klines_shape,omitempty"`
-	LastKlineCloseAgeSec    *float64 `json:"last_closed_kline_age_sec,omitempty"`
+	LastClosedKlineAgeSec   *float64 `json:"last_closed_kline_age_sec,omitempty"`
 }
 
 // AccountReport holds account flags and fee rates. Balance amounts are omitted.
@@ -94,22 +113,24 @@ type AccountReport struct {
 	CanTrade           bool   `json:"can_trade"`
 	CanWithdraw        bool   `json:"can_withdraw_account_level"`
 	CanDeposit         bool   `json:"can_deposit"`
-	FiatMakerRate      string `json:"fiat_maker_rate,omitempty"`
-	FiatTakerRate      string `json:"fiat_taker_rate,omitempty"`
+	MakerRate          string `json:"maker_rate,omitempty"`
+	TakerRate          string `json:"taker_rate,omitempty"`
 	RawMakerCommission string `json:"raw_maker_commission,omitempty"`
 	RawTakerCommission string `json:"raw_taker_commission,omitempty"`
 	AssetCount         int    `json:"asset_count"`
 }
 
-// manualChecks lists facts the API cannot reveal.
-var manualChecks = []string{
-	"API key permissions (read / trade / withdraw) are not exposed by the API: confirm in the Binance TR web UI that withdraw is disabled.",
-	"IP whitelist support is not exposed by the API: check whether the API management page offers an IP restriction option.",
-	"Delisting and maintenance announcements: note where Binance TR publishes them (web page, e-mail, API).",
+// PermissionReport mirrors exchange.KeyPermissions.
+type PermissionReport struct {
+	IPRestricted bool     `json:"ip_restricted"`
+	Reading      bool     `json:"reading"`
+	SpotTrading  bool     `json:"spot_trading"`
+	Withdrawals  bool     `json:"withdrawals"`
+	OtherEnabled []string `json:"other_enabled"`
 }
 
-// Run performs the check. Individual failures are recorded in Report.Errors;
-// Run returns an error only when ctx is done.
+// Run performs the check. Individual failures go to Report.Errors; Run
+// returns an error only when ctx is done.
 func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 	now := opts.Now
 	if now == nil {
@@ -118,7 +139,9 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 	if opts.ClockSamples < 1 {
 		opts.ClockSamples = 1
 	}
-	rep := &Report{GeneratedAt: now().UTC(), Watched: []SymbolReport{}, Errors: []string{}, ManualChecks: manualChecks}
+	_, hasPerms := v.(PermissionSource)
+	rep := &Report{GeneratedAt: now().UTC(), Venue: opts.Venue, Watched: []SymbolReport{},
+		Warnings: []string{}, Errors: []string{}, ManualChecks: manualChecks(hasPerms)}
 	fail := func(step string, err error) { rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %v", step, err)) }
 	pause := func() error {
 		if opts.Pause <= 0 {
@@ -145,8 +168,7 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 			fail("server_time", err)
 		} else {
 			rtt := t1.Sub(t0)
-			mid := t0.Add(rtt / 2)
-			offsets = append(offsets, st.Sub(mid).Milliseconds())
+			offsets = append(offsets, st.Sub(t0.Add(rtt/2)).Milliseconds())
 			if rtt > maxRTT {
 				maxRTT = rtt
 			}
@@ -160,25 +182,25 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 	}
 
 	// Symbol rules.
-	syms, err := v.Symbols(ctx)
-	if err != nil {
+	byName := map[string]exchange.Symbol{}
+	if syms, err := v.Symbols(ctx); err != nil {
 		fail("symbols", err)
-	}
-	byName := make(map[string]exchange.Symbol, len(syms))
-	if err == nil {
-		sum := &SymbolsSummary{Total: len(syms), ByType: map[int]int{}, TRYByType: map[int]int{}}
+	} else {
+		sum := &SymbolsSummary{Total: len(syms), Quote: opts.Quote, ByType: map[int]int{}}
 		for _, s := range syms {
 			byName[s.Name] = s
-			sum.ByType[s.Type]++
-			if s.Quote == "TRY" {
-				sum.TRYQuoted++
-				sum.TRYByType[s.Type]++
-				if s.SpotEnabled {
-					sum.TRYSpotEnabled++
-				}
-			} else {
-				sum.NonTRYQuoted++
+			if s.Type != 0 {
+				sum.ByType[s.Type]++
 			}
+			if s.Quote == opts.Quote {
+				sum.QuoteCount++
+				if s.SpotEnabled {
+					sum.QuoteSpotEnabled++
+				}
+			}
+		}
+		if len(sum.ByType) == 0 {
+			sum.ByType = nil
 		}
 		rep.Symbols = sum
 	}
@@ -186,7 +208,19 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 		return rep, err
 	}
 
-	// Watched symbols: rules, depth, klines.
+	// Liquidity ranking for the quote asset.
+	if ts, ok := v.(TickerSource); ok && opts.TopN > 0 {
+		if tickers, err := ts.Tickers24h(ctx); err != nil {
+			fail("tickers_24h", err)
+		} else {
+			rep.TopByQuoteVolume = topByVolume(tickers, byName, opts.Quote, opts.TopN)
+		}
+		if err := pause(); err != nil {
+			return rep, err
+		}
+	}
+
+	// Watched symbols.
 	for _, name := range opts.Symbols {
 		sr := SymbolReport{Name: name}
 		s, ok := byName[name]
@@ -194,37 +228,30 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 			rep.Watched = append(rep.Watched, sr)
 			continue
 		}
-		sr.Found, sr.Type, sr.SpotEnabled, sr.OCOEnabled = true, s.Type, s.SpotEnabled, s.OCOEnabled
+		sr.Found, sr.Status, sr.SpotEnabled, sr.OCOEnabled = true, s.Status, s.SpotEnabled, s.OCOEnabled
 		sr.OrderTypes, sr.STPDefault, sr.STPAllowed = s.OrderTypes, s.STPDefault, s.STPAllowed
 		sr.TickSize, sr.StepSize = dec(s.Filters.TickSize), dec(s.Filters.StepSize)
 		sr.MinQty, sr.MinNotional = dec(s.Filters.MinQty), dec(s.Filters.MinNotional)
 		sr.NotionalAppliesToMarket = s.Filters.NotionalAppliesToMarket
 
-		ob, shape, err := v.Depth(ctx, s, 5)
-		if err != nil {
+		if ob, err := v.Depth(ctx, s, 5); err != nil {
 			fail("depth "+name, err)
-		} else {
-			sr.DepthShape = string(shape)
-			if len(ob.Bids) > 0 && len(ob.Asks) > 0 {
-				sr.BestBid, sr.BestAsk = dec(ob.Bids[0].Price), dec(ob.Asks[0].Price)
-				sr.SpreadBps = spreadBps(ob.Bids[0].Price, ob.Asks[0].Price)
-			}
+		} else if len(ob.Bids) > 0 && len(ob.Asks) > 0 {
+			sr.BestBid, sr.BestAsk = dec(ob.Bids[0].Price), dec(ob.Asks[0].Price)
+			sr.SpreadBps = spreadBps(ob.Bids[0].Price, ob.Asks[0].Price)
 		}
 		if err := pause(); err != nil {
 			return rep, err
 		}
-		ks, shape, err := v.Klines(ctx, s, "1m", 2)
-		if err != nil {
+		if ks, err := v.Klines(ctx, s, "1m", 2); err != nil {
 			fail("klines "+name, err)
 		} else {
-			sr.KlinesShape = string(shape)
-			// The newest kline is usually still open (close time in the
-			// future), so measure the age of the newest closed one.
+			// The newest kline is usually still open; use the newest closed one.
 			t := now()
 			for i := len(ks) - 1; i >= 0; i-- {
 				if !ks[i].CloseTime.After(t) {
 					age := t.Sub(ks[i].CloseTime).Seconds()
-					sr.LastKlineCloseAgeSec = &age
+					sr.LastClosedKlineAgeSec = &age
 					break
 				}
 			}
@@ -235,21 +262,81 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 		}
 	}
 
-	// Account (signed).
+	// Signed endpoints.
 	if !opts.CheckAccount {
 		rep.AccountSkipped = "no credentials file given"
-	} else if info, err := v.Account(ctx); err != nil {
-		fail("account", err)
 	} else {
-		rep.Account = &AccountReport{
-			CanTrade: info.CanTrade, CanWithdraw: info.CanWithdraw, CanDeposit: info.CanDeposit,
-			FiatMakerRate: dec(info.FiatMakerRate), FiatTakerRate: dec(info.FiatTakerRate),
-			RawMakerCommission: info.RawMakerCommission, RawTakerCommission: info.RawTakerCommission,
-			AssetCount: len(info.Balances),
+		if info, err := v.Account(ctx); err != nil {
+			fail("account", err)
+		} else {
+			rep.Account = &AccountReport{
+				CanTrade: info.CanTrade, CanWithdraw: info.CanWithdraw, CanDeposit: info.CanDeposit,
+				MakerRate: dec(info.MakerRate), TakerRate: dec(info.TakerRate),
+				RawMakerCommission: info.RawMakerCommission, RawTakerCommission: info.RawTakerCommission,
+				AssetCount: len(info.Balances),
+			}
+		}
+		if ps, ok := v.(PermissionSource); ok {
+			if err := pause(); err != nil {
+				return rep, err
+			}
+			if p, err := ps.KeyPermissions(ctx); err != nil {
+				fail("key_permissions", err)
+			} else {
+				rep.KeyPermissions = &PermissionReport{IPRestricted: p.IPRestricted, Reading: p.Reading,
+					SpotTrading: p.SpotTrading, Withdrawals: p.Withdrawals, OtherEnabled: append([]string{}, p.OtherEnabled...)}
+				rep.Warnings = append(rep.Warnings, permissionWarnings(p)...)
+			}
 		}
 	}
 	rep.RateLimitHeaders = v.Usage()
 	return rep, nil
+}
+
+// permissionWarnings flags permissions the design forbids (I-7) or limits.
+func permissionWarnings(p exchange.KeyPermissions) []string {
+	var w []string
+	if p.Withdrawals {
+		w = append(w, "API key has WITHDRAWALS enabled: disable it now (invariant I-7)")
+	}
+	if p.SpotTrading && !p.IPRestricted {
+		w = append(w, "API key can trade without an IP restriction: restrict it to the server IP")
+	}
+	if len(p.OtherEnabled) > 0 {
+		w = append(w, fmt.Sprintf("API key has extra permissions enabled: %v; only reading (and later spot trading) is needed", p.OtherEnabled))
+	}
+	return w
+}
+
+func manualChecks(hasPerms bool) []string {
+	out := []string{"Delisting and maintenance announcements: note where the venue publishes them (web page, e-mail, API)."}
+	if !hasPerms {
+		out = append([]string{
+			"API key permissions (read / trade / withdraw) are not exposed by this venue's API: confirm in the web UI that withdraw is disabled.",
+			"IP whitelist support is not exposed by this venue's API: check the API management page.",
+		}, out...)
+	}
+	return out
+}
+
+// topByVolume ranks spot-enabled symbols of the quote asset by 24h quote volume.
+func topByVolume(ts []exchange.Ticker, byName map[string]exchange.Symbol, quote string, n int) []TopSymbol {
+	var cand []exchange.Ticker
+	for _, t := range ts {
+		s, ok := byName[t.Symbol]
+		if ok && s.Quote == quote && s.SpotEnabled && t.QuoteVolume != nil {
+			cand = append(cand, t)
+		}
+	}
+	sort.Slice(cand, func(i, j int) bool { return cand[i].QuoteVolume.Cmp(cand[j].QuoteVolume) > 0 })
+	if len(cand) > n {
+		cand = cand[:n]
+	}
+	out := make([]TopSymbol, 0, len(cand))
+	for _, t := range cand {
+		out = append(out, TopSymbol{Symbol: t.Symbol, QuoteVolume24h: t.QuoteVolume.FloatString(0), LastPrice: dec(t.LastPrice)})
+	}
+	return out
 }
 
 func median(xs []int64) int64 {
@@ -269,8 +356,8 @@ func spreadBps(bid, ask *big.Rat) *float64 {
 	}
 	mid := new(big.Rat).Add(bid, ask)
 	mid.Quo(mid, big.NewRat(2, 1))
-	diff := new(big.Rat).Sub(ask, bid)
-	bps := new(big.Rat).Quo(diff, mid)
+	bps := new(big.Rat).Sub(ask, bid)
+	bps.Quo(bps, mid)
 	bps.Mul(bps, big.NewRat(10000, 1))
 	f, _ := bps.Float64() // reporting only
 	return &f

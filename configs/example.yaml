@@ -5,11 +5,11 @@
 mode: paper                     # paper | live_small | live_full
 
 venue:
-  primary: binance_tr           # D-3
+  primary: binance              # D-17: binance.com (binance_tr also supported)
   secondary: btcturk
   secondary_enabled: false      # BtcTurk adapter arrives in W9
 
-quote_currency: TRY
+quote_currency: USDT            # binance: USDT, binance_tr: TRY
 
 capital:
   planned_usd: 200
@@ -20,10 +20,10 @@ risk:
   on_max_dd: close_all          # close_all | hold_stops
   max_daily_loss_pct: 3
   max_weekly_loss_pct: 7
-  max_order_notional_usd: 40    # converted to TRY with the recorded USD/TRY rate
+  max_order_notional_usd: 40
   max_daily_turnover_pct: 50
   max_venue_exposure_pct: 100   # 60 once BtcTurk is enabled
-  fx_shock_pct: 3
+  fx_shock_pct: 3               # quote currency shock guard (USDT/USD depeg for binance)
   per_trade_risk_pct: 0.5
   max_position_pct: 20
   max_gross_exposure_pct: 80

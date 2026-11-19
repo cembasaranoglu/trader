@@ -204,7 +204,7 @@ func (c *checker) nonEmpty(path string, p *string) string {
 func (c *checker) build(r *rawConfig) *Config {
 	cfg := &Config{
 		Mode:          Mode(c.oneOf("mode", r.Mode, string(ModePaper), string(ModeLiveSmall), string(ModeLiveFull))),
-		QuoteCurrency: c.oneOf("quote_currency", r.QuoteCurrency, "TRY"),
+		QuoteCurrency: c.oneOf("quote_currency", r.QuoteCurrency, "USDT", "TRY"),
 	}
 	if present(c, "venue", r.Venue) {
 		cfg.Venue = c.venue(r.Venue)
@@ -248,7 +248,7 @@ func (c *checker) build(r *rawConfig) *Config {
 
 func (c *checker) venue(v *rawVenue) Venue {
 	out := Venue{
-		Primary:          c.oneOf("venue.primary", v.Primary, "binance_tr"),
+		Primary:          c.oneOf("venue.primary", v.Primary, "binance", "binance_tr"),
 		Secondary:        c.oneOf("venue.secondary", v.Secondary, "btcturk"),
 		SecondaryEnabled: val(c, "venue.secondary_enabled", v.SecondaryEnabled),
 	}
@@ -391,6 +391,13 @@ func (c *checker) crossChecks(r *rawConfig) {
 	}
 	if cp := r.Capital; cp != nil && cp.PlannedUSD != nil && cp.LiveSmallMaxUSD != nil && *cp.LiveSmallMaxUSD > *cp.PlannedUSD {
 		c.invalid("capital.live_small_max_usd", "must be <= capital.planned_usd")
+	}
+	if v := r.Venue; v != nil && v.Primary != nil && r.QuoteCurrency != nil {
+		// Each venue trades against one quote currency (D-17: binance uses USDT).
+		want := map[string]string{"binance": "USDT", "binance_tr": "TRY"}[*v.Primary]
+		if want != "" && *r.QuoteCurrency != want {
+			c.invalid("quote_currency", "venue %s trades against %s, got %s", *v.Primary, want, *r.QuoteCurrency)
+		}
 	}
 	if v := r.Venue; v != nil && v.SecondaryEnabled != nil && *v.SecondaryEnabled {
 		// The BtcTurk adapter arrives in W9; enabling it before then is a configuration error.

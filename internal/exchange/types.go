@@ -11,11 +11,12 @@ import (
 
 // Symbol describes one tradable pair and its exchange rules.
 type Symbol struct {
-	Name        string // venue-native name, e.g. "BTC_TRY"
+	Name        string // venue-native name, e.g. "BTC_TRY" or "BTCUSDT"
 	Base        string
 	Quote       string
-	Type        int  // venue routing class (Binance TR: 1 main, 2/3 next)
-	SpotEnabled bool // spot trading allowed right now
+	Status      string // venue status, e.g. "TRADING"; empty when not published
+	Type        int    // venue routing class (Binance TR: 1 main, 2/3 next; 0 elsewhere)
+	SpotEnabled bool   // spot trading allowed right now
 	OCOEnabled  bool
 	OrderTypes  []string
 	STPDefault  string
@@ -68,15 +69,32 @@ type AccountInfo struct {
 	CanTrade    bool
 	CanWithdraw bool // account-level flag; it does not describe API key permissions
 	CanDeposit  bool
-	// Fiat (TRY) pair commission rates as fractions (0.0015 = 0.15%).
-	// Nil when not published.
-	FiatMakerRate *big.Rat
-	FiatTakerRate *big.Rat
-	// Raw crypto-pair commission values as published. Their unit is not
-	// documented by Binance TR, so they are not converted.
+	// Commission rates as fractions (0.001 = 0.1%); nil when not published.
+	// Binance: commissionRates. Binance TR: fiat (TRY) pair rates.
+	MakerRate *big.Rat
+	TakerRate *big.Rat
+	// Raw commission values as published, without unit conversion.
 	RawMakerCommission string
 	RawTakerCommission string
 	Balances           []Balance
+}
+
+// Ticker is a 24-hour rolling summary for one symbol.
+type Ticker struct {
+	Symbol      string
+	LastPrice   *big.Rat
+	QuoteVolume *big.Rat // 24h traded volume in the quote asset
+}
+
+// KeyPermissions describes what an API key may do, as reported by the venue.
+type KeyPermissions struct {
+	IPRestricted bool
+	Reading      bool
+	SpotTrading  bool
+	Withdrawals  bool
+	// OtherEnabled lists any other permission flags that are switched on
+	// (for example margin, futures or transfers), by their venue names.
+	OtherEnabled []string
 }
 
 // Balance is the free and locked amount of one asset.
