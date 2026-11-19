@@ -86,7 +86,7 @@ type SymbolReport struct {
 	BestAsk                 string   `json:"best_ask,omitempty"`
 	SpreadBps               *float64 `json:"spread_bps,omitempty"`
 	KlinesShape             string   `json:"klines_shape,omitempty"`
-	LastKlineCloseAgeSec    *float64 `json:"last_kline_close_age_sec,omitempty"`
+	LastKlineCloseAgeSec    *float64 `json:"last_closed_kline_age_sec,omitempty"`
 }
 
 // AccountReport holds account flags and fee rates. Balance amounts are omitted.
@@ -218,9 +218,15 @@ func Run(ctx context.Context, v Venue, opts Options) (*Report, error) {
 			fail("klines "+name, err)
 		} else {
 			sr.KlinesShape = string(shape)
-			if n := len(ks); n > 0 {
-				age := now().Sub(ks[n-1].CloseTime).Seconds()
-				sr.LastKlineCloseAgeSec = &age
+			// The newest kline is usually still open (close time in the
+			// future), so measure the age of the newest closed one.
+			t := now()
+			for i := len(ks) - 1; i >= 0; i-- {
+				if !ks[i].CloseTime.After(t) {
+					age := t.Sub(ks[i].CloseTime).Seconds()
+					sr.LastKlineCloseAgeSec = &age
+					break
+				}
 			}
 		}
 		rep.Watched = append(rep.Watched, sr)

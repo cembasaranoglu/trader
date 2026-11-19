@@ -1,6 +1,6 @@
 # Binance TR: doğrulanmış ve doğrulanacak bilgiler
 
-Kaynak: [Binance TR Open API](https://www.binance.tr/apidocs), 2026-11-19'da okundu. Geliştirme ortamı Binance TR'ye ağ erişimine sahip olmadığı için aşağıdaki "dokümana göre" bilgiler canlı API'de henüz ölçülmedi. `venuecheck` komutu bunları ölçer.
+Kaynak: [Binance TR Open API](https://www.binance.tr/apidocs), 2026-11-19'da okundu, ve aynı gün kullanıcının makinesinde çalıştırılan `venuecheck` ölçümü.
 
 ## Dokümana göre (adaptörde uygulandı)
 
@@ -15,14 +15,26 @@ Kaynak: [Binance TR Open API](https://www.binance.tr/apidocs), 2026-11-19'da oku
 | Hesap | `GET /open/v1/account/spot` (imzalı): `canTrade`, `canWithdraw`, `canDeposit` hesap düzeyindedir, API anahtarının yetkilerini göstermez |
 | Ücret | `fiatMakerCommission` / `fiatTakerCommission` kesir olarak (örnek `0.001500` = %0,15) |
 
-## `venuecheck` ile ölçülecekler
+## Canlı ölçüm (venuecheck, 2026-11-19 05:56 UTC, kimlik bilgisi olmadan)
 
-- Saat farkı (sunucu − yerel) ve gidiş-dönüş süresi.
-- TRY paritelerinin sayısı ve symbol type dağılımı (dokümanda tip 1 "Main", 2 "Next"; host notunda ise tip 3 geçiyor; tutarsız).
-- İzlenen pariteler için tick, step, minimum miktar, minimum notional, OCO ve STP modları.
-- Piyasa verisi hostlarının zarf mı ham format mı döndürdüğü (adaptör ikisini de kabul eder ve hangisini aldığını raporlar).
-- Rate limit başlıklarının gerçek adları ve değerleri.
-- Kimlik bilgisi verilirse: hesap bayrakları ve TRY ücret oranları. Bakiye tutarları rapora yazılmaz.
+Tek bir ölçümdür; spread ve saat farkı ana göre değişir.
+
+| Konu | Ölçülen | Dokümanla karşılaştırma |
+| --- | --- | --- |
+| Saat farkı | Medyan +60 ms (sunucu yerelden ileride), en yüksek gidiş-dönüş 471 ms | `ops.max_clock_skew_ms: 500` ile uyumlu |
+| Sembol sayısı | 309 sembolün tamamı TRY paritesi, tamamı spot işleme açık, tamamı symbol type 1 | "Next" host'u (tip 2/3) şu an kullanılmıyor |
+| Piyasa verisi formatı | Depth ve klines **ham** (zarfsız) Binance formatında döndü | Doküman zarf gösteriyordu; adaptör ikisini de kabul ettiği için sorun çıkmadı |
+| BTC_TRY kuralları | Tick 1 TRY, step 0,00001, min miktar 0,00001, **min notional 10 TRY**, OCO açık | Notional kontrolü market emirlerine uygulanma bayrağı `false` döndü |
+| ETH_TRY kuralları | Tick 1 TRY, step 0,0001, min miktar 0,0001, **min notional 10 TRY**, OCO açık | — |
+| Emir tipleri | LIMIT, LIMIT_MAKER, MARKET, STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT | Doküman örneğinde olmayan STOP_LOSS ve TAKE_PROFIT de var |
+| STP | Varsayılan EXPIRE_MAKER; izinli: EXPIRE_TAKER, EXPIRE_MAKER, EXPIRE_BOTH, DECREMENT, TRANSFER | Config'teki `EXPIRE_TAKER` destekleniyor |
+| En iyi fiyat farkı (spread) | BTC_TRY 0,003 bps, ETH_TRY 0,11 bps | Yalnız en iyi seviye; derinlik ölçülmedi |
+| Rate limit başlığı | `x-mbx-used-weight` ve `x-mbx-used-weight-1m`, yaklaşık 11 istekten sonra 14 | Sayısal üst limit hâlâ bilinmiyor |
+
+Sonuçlar:
+
+- Minimum emir tutarı 10 TRY olduğu için 40 USD'lik emir tavanı (D-16) borsa minimumuna takılmaz.
+- İlk raporda son mumun yaşı negatif çıktı, çünkü en yeni mum henüz kapanmamıştı. Ölçüm artık en son **kapanmış** mumun yaşını raporluyor (`last_closed_kline_age_sec`).
 
 ## API'nin gösteremediği (elle kontrol)
 
@@ -30,3 +42,4 @@ Kaynak: [Binance TR Open API](https://www.binance.tr/apidocs), 2026-11-19'da oku
 - IP kısıtlaması desteği.
 - Delist ve bakım duyurularının yayımlandığı kanal.
 - `clientOrderId` tekrar davranışı ve testnet varlığı (dokümanda bulunamadı).
+- Hesap bayrakları ve TRY ücret oranları: yalnız okuma yetkili anahtarla `venuecheck -credentials` çalıştırılınca ölçülecek.

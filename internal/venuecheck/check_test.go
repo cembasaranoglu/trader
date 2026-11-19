@@ -64,8 +64,9 @@ func newFake(now time.Time) *fakeVenue {
 			{Name: "NEW_TRY", Quote: "TRY", Type: 2},
 			{Name: "ADA_BNB", Quote: "BNB", Type: 1, SpotEnabled: true},
 		},
-		book:    exchange.OrderBook{Bids: []exchange.Level{{Price: r("99"), Qty: r("1")}}, Asks: []exchange.Level{{Price: r("101"), Qty: r("1")}}},
-		klines:  []exchange.Kline{{CloseTime: now.Add(-30 * time.Second)}},
+		book: exchange.OrderBook{Bids: []exchange.Level{{Price: r("99"), Qty: r("1")}}, Asks: []exchange.Level{{Price: r("101"), Qty: r("1")}}},
+		// Oldest first: one closed candle, then the still-open current candle.
+		klines:  []exchange.Kline{{CloseTime: now.Add(-30 * time.Second)}, {CloseTime: now.Add(30 * time.Second)}},
 		account: exchange.AccountInfo{CanTrade: true, FiatTakerRate: r("0.0015"), Balances: []exchange.Balance{{Asset: "TRY", Free: r("1234.5")}}},
 	}
 }
