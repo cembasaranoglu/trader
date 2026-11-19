@@ -164,8 +164,10 @@ func observe(ctx context.Context, p observeParams, w io.Writer, stdout, stderr i
 
 	enc := json.NewEncoder(w)
 	start := time.Now()
-	stale := map[string]int64{}
+	stale := map[string]time.Duration{} // measured by elapsed time, not by tick count
 	var errs []string
+	var errMu sync.Mutex
+	lastTick := start
 	second := time.NewTicker(time.Second)
 	defer second.Stop()
 	nextMinute := start.Add(time.Minute)
@@ -174,19 +176,17 @@ func observe(ctx context.Context, p observeParams, w io.Writer, stdout, stderr i
 	report := func(typ string, interrupted bool) observeReport {
 		r := observeReport{Type: typ, Time: time.Now().UTC(), ElapsedSec: int64(time.Since(start).Seconds()),
 			Interrupted: interrupted, WS: wsStats(stream.Stats()), Symbols: map[string]symbolReport{},
-			RateLimit: rest.Usage(), Errors: append([]string{}, errs...)}
+			RateLimit: rest.Usage()}
+		errMu.Lock()
+		r.Errors = append([]string{}, errs...)
+		errMu.Unlock()
 		now := time.Now()
 		for name, s := range md.Stats() {
-			r.Symbols[name] = symbolReport{BookState: s.BookState, BookSnapshots: s.Book.Snapshots,
+			r.Symbols[name] = symbolReport{BookState: s.BookState, BookUpdateID: s.BookUpdateID, BookSnapshots: s.Book.Snapshots,
 				BookGaps: s.Book.Gaps, BookCrossed: s.Book.Crossed, BookScaleUp: s.Book.ScaleRaises,
 				BookBadValues: s.Book.BadValues, BookIgnored: s.Book.Ignored, SnapshotErrors: s.SnapshotErrs,
 				Bars: s.Bars, BarsFromREST: s.BarsFromREST, BarGapsUnfill: s.BarGapsUnfill, Trades: s.Trades,
-				TradeGaps: s.TradeGaps, Tickers: s.Tickers, StaleSeconds: stale[name], LastEventAgeMs: ageMs(now, s.LastEvent)}
-			if v, ok := md.Book(name, 0); ok {
-				sr := r.Symbols[name]
-				sr.BookUpdateID = v.LastUpdateID
-				r.Symbols[name] = sr
-			}
+				TradeGaps: s.TradeGaps, Tickers: s.Tickers, StaleSeconds: int64(stale[name].Seconds()), LastEventAgeMs: ageMs(now, s.LastEvent)}
 		}
 		return r
 	}
@@ -197,21 +197,31 @@ loop:
 		case <-runCtx.Done():
 			break loop
 		case now := <-second.C:
+			elapsed := now.Sub(lastTick)
+			lastTick = now
 			md.RetrySnapshots()
 			for _, name := range md.Symbols() {
 				if md.Stale(name) {
-					stale[name]++
+					stale[name] += elapsed
 				}
 			}
 			if !now.Before(nextMinute) {
 				nextMinute = nextMinute.Add(time.Minute)
 				// One signed-host request per minute so both hosts report
-				// X-MBX-USED-WEIGHT-1M (unknown K-9: shared or separate counters).
-				tctx, tcancel := context.WithTimeout(runCtx, 10*time.Second)
-				if _, err := rest.ServerTime(tctx); err != nil && runCtx.Err() == nil {
-					errs = appendBounded(errs, "server_time: "+err.Error())
-				}
-				tcancel()
+				// X-MBX-USED-WEIGHT-1M (unknown K-9: shared or separate
+				// counters). It runs in the background so a slow response
+				// cannot delay the freshness sampling.
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					tctx, tcancel := context.WithTimeout(runCtx, 10*time.Second)
+					defer tcancel()
+					if _, err := rest.ServerTime(tctx); err != nil && runCtx.Err() == nil {
+						errMu.Lock()
+						errs = appendBounded(errs, "server_time: "+err.Error())
+						errMu.Unlock()
+					}
+				}()
 				if writeErr == nil {
 					writeErr = enc.Encode(report("minute", false))
 				}

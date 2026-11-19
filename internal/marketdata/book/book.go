@@ -53,8 +53,9 @@ func (s State) String() string {
 	return fmt.Sprintf("State(%d)", int(s))
 }
 
-// DefaultMaxBuffer bounds buffered events while waiting for a snapshot.
-const DefaultMaxBuffer = 10000
+// DefaultMaxBuffer bounds buffered events while waiting for a snapshot:
+// about 100 seconds of a @depth@100ms stream.
+const DefaultMaxBuffer = 1000
 
 // Stats are cumulative counters.
 type Stats struct {
@@ -84,6 +85,11 @@ type Book struct {
 	requested bool // a snapshot request is outstanding
 	failure   error
 	stats     Stats
+
+	// Cached best prices; a removal of the best level invalidates the cache
+	// and the next lookup rescans that side.
+	bestBid, bestAsk   int64
+	bidValid, askValid bool
 }
 
 // New returns a book in the Syncing state. maxBuf <= 0 selects DefaultMaxBuffer.
@@ -110,6 +116,7 @@ func (b *Book) reset() {
 	b.state = Syncing
 	b.bids = map[int64]int64{}
 	b.asks = map[int64]int64{}
+	b.bidValid, b.askValid = false, false
 	b.lastID = 0
 	b.buf = b.buf[:0]
 }
@@ -228,6 +235,7 @@ func (b *Book) ApplySnapshot(ob exchange.OrderBook) (bool, error) {
 	pending := slices.Clone(b.buf)
 	b.buf = b.buf[:0]
 	b.bids, b.asks, b.lastID, b.state = bids, asks, ob.LastUpdateID, Live
+	b.bidValid, b.askValid = false, false
 	b.stats.Snapshots++
 	first := true
 	for i, ev := range pending {
@@ -339,14 +347,14 @@ func (b *Book) parse(s string, price bool) (int64, error) {
 // never leaves the book half-updated.
 func (b *Book) apply(ev *ws.DepthEvent) error {
 	type upd struct {
-		side map[int64]int64
+		bid  bool
 		p, q int64
 	}
 	ups := make([]upd, 0, len(ev.Bids)+len(ev.Asks))
 	for _, side := range []struct {
 		levels [][2]string
-		m      map[int64]int64
-	}{{ev.Bids, b.bids}, {ev.Asks, b.asks}} {
+		bid    bool
+	}{{ev.Bids, true}, {ev.Asks, false}} {
 		for _, l := range side.levels {
 			p, err := b.parse(l[0], true)
 			if err != nil {
@@ -356,18 +364,34 @@ func (b *Book) apply(ev *ws.DepthEvent) error {
 			if err != nil {
 				return err
 			}
-			ups = append(ups, upd{side.m, p, q})
+			ups = append(ups, upd{side.bid, p, q})
 		}
 	}
 	for _, u := range ups {
-		if u.q == 0 {
-			delete(u.side, u.p)
+		if u.bid {
+			b.setLevel(b.bids, u.p, u.q, &b.bestBid, &b.bidValid, func(p, best int64) bool { return p > best })
 		} else {
-			u.side[u.p] = u.q
+			b.setLevel(b.asks, u.p, u.q, &b.bestAsk, &b.askValid, func(p, best int64) bool { return p < best })
 		}
 	}
 	b.lastID = ev.FinalUpdateID
 	return nil
+}
+
+// setLevel updates one side and keeps the cached best price consistent:
+// removing the best level invalidates the cache; a better new level replaces it.
+func (b *Book) setLevel(side map[int64]int64, p, q int64, best *int64, valid *bool, better func(p, best int64) bool) {
+	if q == 0 {
+		delete(side, p)
+		if *valid && p == *best {
+			*valid = false
+		}
+		return
+	}
+	side[p] = q
+	if *valid && better(p, *best) {
+		*best = p
+	}
 }
 
 func (b *Book) handleApplyError(err error, ev *ws.DepthEvent) bool {
@@ -391,17 +415,25 @@ func (b *Book) handleApplyError(err error, ev *ws.DepthEvent) bool {
 }
 
 func (b *Book) best() (bid, ask int64, okBid, okAsk bool) {
-	for p := range b.bids {
-		if !okBid || p > bid {
-			bid, okBid = p, true
+	if !b.bidValid {
+		b.bestBid, okBid = 0, false
+		for p := range b.bids {
+			if !okBid || p > b.bestBid {
+				b.bestBid, okBid = p, true
+			}
 		}
+		b.bidValid = okBid
 	}
-	for p := range b.asks {
-		if !okAsk || p < ask {
-			ask, okAsk = p, true
+	if !b.askValid {
+		b.bestAsk, okAsk = 0, false
+		for p := range b.asks {
+			if !okAsk || p < b.bestAsk {
+				b.bestAsk, okAsk = p, true
+			}
 		}
+		b.askValid = okAsk
 	}
-	return
+	return b.bestBid, b.bestAsk, b.bidValid, b.askValid
 }
 
 func (b *Book) crossed() bool {

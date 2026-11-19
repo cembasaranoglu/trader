@@ -93,6 +93,12 @@ func Decode(b []byte) (string, any, error) {
 	if err := json.Unmarshal(b, &env); err != nil {
 		return "", nil, fmt.Errorf("%w: envelope: %v", ErrMalformed, err)
 	}
+	if env.Stream == nil && env.Data == nil {
+		// The documented raw (non-combined) serverShutdown form.
+		if ev, err := decodeShutdown(b); err == nil {
+			return "!serverShutdown", ev, nil
+		}
+	}
 	if env.Stream == nil || env.Data == nil || *env.Stream == "" || bytes.Equal(bytes.TrimSpace(*env.Data), []byte("null")) {
 		return "", nil, fmt.Errorf("%w: envelope lacks stream or data", ErrMalformed)
 	}
@@ -281,8 +287,8 @@ func decodeDepth(b []byte) (*DepthEvent, error) {
 	if w.E == nil || *w.E != "depthUpdate" || w.U1 == nil || w.U2 == nil || w.B == nil || w.A == nil {
 		return nil, errors.New("depthUpdate lacks required fields")
 	}
-	if *w.U1 > *w.U2 {
-		return nil, errors.New("first update id U greater than final update id u")
+	if *w.U1 <= 0 || *w.U1 > *w.U2 {
+		return nil, errors.New("update ids must satisfy 0 < U <= u")
 	}
 	ev := &DepthEvent{FirstUpdateID: *w.U1, FinalUpdateID: *w.U2, Bids: *w.B, Asks: *w.A}
 	var err error

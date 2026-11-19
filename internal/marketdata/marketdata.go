@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cembasaranoglu/trader/internal/exchange"
+	"github.com/cembasaranoglu/trader/internal/exchange/binance"
 	"github.com/cembasaranoglu/trader/internal/exchange/binance/ws"
 	"github.com/cembasaranoglu/trader/internal/marketdata/book"
 )
@@ -46,12 +47,14 @@ type Bar struct {
 
 // Trade is one aggregate trade.
 type Trade struct {
-	Symbol     string
-	AggID      int64
-	Price      *big.Rat
-	Qty        *big.Rat
-	Time       time.Time
-	BuyerMaker bool
+	Symbol       string
+	AggID        int64
+	FirstTradeID int64
+	LastTradeID  int64
+	Price        *big.Rat
+	Qty          *big.Rat
+	Time         time.Time
+	BuyerMaker   bool
 }
 
 // Ticker is the best bid and ask.
@@ -111,6 +114,7 @@ func (c Config) Streams() []string {
 type SymbolStats struct {
 	Book          book.Stats
 	BookState     string
+	BookUpdateID  int64
 	SnapshotErrs  int64
 	Bars          int64
 	BarsFromREST  int64
@@ -132,7 +136,8 @@ type klineTrack struct {
 type symState struct {
 	sym       exchange.Symbol
 	book      *book.Book
-	snapRetry int // consecutive snapshots that did not make the book live
+	snapRetry int       // consecutive snapshots that did not leave the book live for long
+	liveSince time.Time // when the book last became live
 	klines    map[string]*klineTrack
 	lastAgg   int64
 	lastTkr   int64
@@ -302,6 +307,11 @@ func (m *Manager) RetrySnapshots() {
 // snapshot that lags the stream cannot cause a tight request loop.
 // It must be called with m.mu held.
 func (m *Manager) fetchSnapshot(st *symState) {
+	// A book that stayed live for a while earns a fresh retry budget; one that
+	// keeps breaking right after a snapshot (bad values, crossed) backs off.
+	if st.snapRetry > 0 && !st.liveSince.IsZero() && m.now().Sub(st.liveSince) >= snapshotHealthy {
+		st.snapRetry = 0
+	}
 	var delay time.Duration
 	if st.snapRetry > 0 {
 		delay = m.cfg.SnapshotDelay << min(st.snapRetry-1, 16)
@@ -337,6 +347,18 @@ func (m *Manager) fetchSnapshot(st *symState) {
 		ob, err := m.rest.Depth(ctx, st.sym, m.cfg.DepthLimit)
 		cancel()
 		<-m.sem
+		var wb *binance.WeightBudgetError
+		if errors.As(err, &wb) && sleepCtx(m.ctx, wb.Wait) {
+			// The local budget refused it: wait as instructed and retry
+			// without counting a snapshot error.
+			m.mu.Lock()
+			st.book.SnapshotFailed()
+			if st.book.Retry() {
+				m.fetchSnapshotNow(st)
+			}
+			m.mu.Unlock()
+			return
+		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if err != nil {
@@ -351,12 +373,37 @@ func (m *Manager) fetchSnapshot(st *symState) {
 			return
 		}
 		if st.book.State() == book.Live {
-			st.snapRetry = 0
+			st.liveSince = m.now()
 		}
 		if need {
 			m.fetchSnapshot(st)
 		}
 	}()
+}
+
+// snapshotHealthy is how long a book must stay live before its snapshot
+// retry backoff resets.
+const snapshotHealthy = time.Minute
+
+// fetchSnapshotNow fetches without adding backoff (used after a budget
+// wait, which already delayed the request). Call with m.mu held.
+func (m *Manager) fetchSnapshotNow(st *symState) {
+	saved := st.snapRetry
+	st.snapRetry = 0
+	m.fetchSnapshot(st)
+	st.snapRetry = saved
+}
+
+// sleepCtx waits d or until ctx is done; it reports whether d elapsed.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 func (m *Manager) onClosedKline(st *symState, kt *klineTrack, ev *ws.KlineEvent) {
@@ -403,6 +450,10 @@ func (m *Manager) fillGap(st *symState, kt *klineTrack, interval string, from, t
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		kt.filling = false
+		if m.ctx.Err() != nil {
+			kt.pending = nil // shutting down: no partial publication, no false gap
+			return
+		}
 		gap := err != nil
 		if err != nil {
 			m.log.Warn("kline gap fill failed", "symbol", st.sym.Name, "interval", interval, "err", err)
@@ -432,9 +483,17 @@ func (m *Manager) fillGap(st *symState, kt *klineTrack, interval string, from, t
 		pending := kt.pending
 		kt.pending = nil
 		first := true
-		for _, ev := range pending {
+		for i, ev := range pending {
 			if !ev.OpenTime.After(kt.last) {
 				continue
+			}
+			// Another gap inside the bars that arrived during the fill:
+			// fill it before publishing the rest.
+			if next, _ := NextOpen(interval, kt.last); ev.OpenTime.After(next) && !(gap && first) {
+				kt.filling = true
+				kt.pending = append([]*ws.KlineEvent(nil), pending[i:]...)
+				m.fillGap(st, kt, interval, next, ev.OpenTime.Add(-time.Millisecond))
+				return
 			}
 			m.publishWS(st, kt, ev, gap && first)
 			first = false
@@ -457,6 +516,16 @@ func (m *Manager) fetchRange(sym exchange.Symbol, interval string, from, to time
 			ctx, cancel := context.WithTimeout(m.ctx, m.cfg.RESTTimeout)
 			page, err = m.rest.KlinesRange(ctx, sym, interval, start, to, pageSize)
 			cancel()
+			var wb *binance.WeightBudgetError
+			if errors.As(err, &wb) {
+				// Refused locally by the weight budget: wait as instructed;
+				// this does not use up an attempt.
+				if !sleepCtx(m.ctx, wb.Wait) {
+					return all, m.ctx.Err()
+				}
+				attempt--
+				continue
+			}
 			if err == nil || m.ctx.Err() != nil || attempt == m.cfg.GapFillRetries-1 {
 				break
 			}
@@ -490,21 +559,35 @@ func (m *Manager) Stale(symbol string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.symbols[strings.ToUpper(symbol)]
-	if st == nil || st.book.State() != book.Live || st.stats.LastEvent.IsZero() {
+	if st == nil {
+		return true
+	}
+	return m.staleLocked(st)
+}
+
+func (m *Manager) staleLocked(st *symState) bool {
+	if st.book.State() != book.Live || st.stats.LastEvent.IsZero() {
 		return true
 	}
 	return m.now().Sub(st.stats.LastEvent) > m.cfg.MaxDataAge
 }
 
+// BookView is a read-only copy of the top of a book with its freshness,
+// taken under one lock so the levels and the flag agree.
+type BookView struct {
+	book.View
+	Stale bool // R-9: no event within MaxDataAge, or the book is not live
+}
+
 // Book returns up to n levels per side of the symbol's order book.
-func (m *Manager) Book(symbol string, n int) (book.View, bool) {
+func (m *Manager) Book(symbol string, n int) (BookView, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.symbols[strings.ToUpper(symbol)]
 	if st == nil {
-		return book.View{}, false
+		return BookView{}, false
 	}
-	return st.book.View(n), true
+	return BookView{View: st.book.View(n), Stale: m.staleLocked(st)}, true
 }
 
 // Stats returns a copy of the per-symbol counters, keyed by symbol.
@@ -516,6 +599,7 @@ func (m *Manager) Stats() map[string]SymbolStats {
 		s := st.stats
 		s.Book = st.book.Stats()
 		s.BookState = st.book.State().String()
+		s.BookUpdateID = st.book.LastUpdateID()
 		out[name] = s
 	}
 	return out

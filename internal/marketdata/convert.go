@@ -72,7 +72,8 @@ func tradeFrom(ev *ws.AggTradeEvent) (Trade, error) {
 	if err != nil {
 		return Trade{}, err
 	}
-	return Trade{Symbol: ev.Symbol, AggID: ev.AggID, Price: r[0], Qty: r[1], Time: ev.TradeTime, BuyerMaker: ev.BuyerMaker}, nil
+	return Trade{Symbol: ev.Symbol, AggID: ev.AggID, FirstTradeID: ev.FirstTradeID, LastTradeID: ev.LastTradeID,
+		Price: r[0], Qty: r[1], Time: ev.TradeTime, BuyerMaker: ev.BuyerMaker}, nil
 }
 
 func tickerFrom(ev *ws.BookTickerEvent) (Ticker, error) {

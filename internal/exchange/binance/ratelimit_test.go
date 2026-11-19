@@ -134,3 +134,90 @@ func TestKlinesRange(t *testing.T) {
 		}
 	}
 }
+
+// With one host for both classes (Demo Mode), a market-data ban must still
+// not block signed requests (E-13).
+func TestBackoffIsPerClassOnOneHost(t *testing.T) {
+	t.Parallel()
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+	var signedHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/ticker/24hr":
+			w.Header().Set("Retry-After", "300")
+			w.WriteHeader(http.StatusTooManyRequests)
+		case "/api/v3/time":
+			signedHits.Add(1)
+			fmt.Fprint(w, `{"serverTime":1700000000000}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Options{BaseURL: srv.URL, MarketDataURL: srv.URL, HTTPClient: srv.Client(), Now: clk.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tickers24h(context.Background()); !errors.Is(err, ErrRateLimited) {
+		t.Fatal(err)
+	}
+	if _, err := c.Tickers24h(context.Background()); !errors.Is(err, ErrBackoff) {
+		t.Fatalf("market class must back off: %v", err)
+	}
+	if _, err := c.ServerTime(context.Background()); err != nil || signedHits.Load() != 1 {
+		t.Fatalf("signed class blocked on the same host: %v", err)
+	}
+}
+
+func TestSignedBanDoesNotBlockMarketData(t *testing.T) {
+	t.Parallel()
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+	c := twoHostClient(t,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write(fixture(t, "ticker_mini.json"))
+		}), clk)
+	if _, err := c.ServerTime(context.Background()); !errors.Is(err, ErrRateLimited) {
+		t.Fatal(err)
+	}
+	if _, err := c.Tickers24h(context.Background()); err != nil {
+		t.Fatalf("market data blocked by a signed-host ban: %v", err)
+	}
+}
+
+func TestWeightBudgetErrorAndReservation(t *testing.T) {
+	t.Parallel()
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+	var used atomic.Int64
+	used.Store(4700)
+	c := twoHostClient(t, http.NotFoundHandler(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-MBX-USED-WEIGHT-1M", strconv.FormatInt(used.Load(), 10))
+		switch r.URL.Path {
+		case "/api/v3/exchangeInfo":
+			w.Write(fixture(t, "exchange_info.json"))
+		default:
+			fmt.Fprint(w, `{"lastUpdateId":1,"bids":[],"asks":[]}`)
+		}
+	}), clk)
+	if _, err := c.Symbols(context.Background()); err != nil { // reading 4700, limit 6000 → budget 4800
+		t.Fatal(err)
+	}
+	// Two 50-weight requests fit (4800); the reading is reserved locally, and a
+	// stale lower header in the same minute does not release the reservation.
+	used.Store(4700)
+	for i := 0; i < 2; i++ {
+		if _, err := c.Depth(context.Background(), sym("BTCUSDT"), 1000); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	clk.Advance(20 * time.Second)
+	_, err := c.Depth(context.Background(), sym("BTCUSDT"), 1000)
+	var wb *WeightBudgetError
+	if !errors.As(err, &wb) || !errors.Is(err, ErrWeightBudget) {
+		t.Fatalf("want WeightBudgetError, got %v", err)
+	}
+	if wb.Used != 4800 || wb.Wait != 40*time.Second {
+		t.Fatalf("used %d wait %s", wb.Used, wb.Wait)
+	}
+}

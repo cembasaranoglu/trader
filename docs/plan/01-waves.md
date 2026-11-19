@@ -165,7 +165,7 @@ Bu kurallar doğrulayıcı incelemesindeki yüksek önemli bulgulardan çıktı.
 | 10 | Değişecek | `internal/exchange/binance/client.go` (host bazlı geri çekilme, ağırlık sayacı; mevcut testler korunur), `cmd/traderd/main.go`, `internal/config` (`marketdata.*`), `configs/example.yaml`, şema, `go.mod`, README |
 | 11 | Dokunulmayacak | Mevcut config doğrulama kuralları (yalnız ekleme) |
 | 12 | Çalışma yüzeyi | `traderd observe -config <f> -symbols BTCUSDT,ETHUSDT -duration 24h -out observe.jsonl` |
-| 13 | Sözleşmeler | `marketdata.BookView` (en iyi alış/satış, N seviye, `LastUpdateID`, `Stale`), `marketdata.ClosedKline`, `marketdata.Trade` |
+| 13 | Sözleşmeler | `marketdata.BookView` (N seviye, `LastUpdateID`, durum ve `Stale` tek kilit altında), `marketdata.Bar` (yalnız kapanmış mum; `FromREST`, `GapBefore`), `marketdata.Trade` (aggTrade kimliği, ilk/son işlem kimliği), `marketdata.Ticker`; `marketdata.Sink` sırayla çağrılır |
 | 14 | Config/doküman | Zorunlu: `marketdata.depth_limit` (1..5000), `marketdata.kline_intervals` (beyaz liste enum), `marketdata.reconnect_max_backoff_s` (1..300). `docs/exchanges/binance.md` WS bölümü |
 | 15 | Testler | Sahte WS sunucusu (`httptest` + kütüphanenin `Accept`'i): ping/pong; 60 sn sessizlikte kopma; `serverShutdown` ile kesintisiz devir; 24 sa devri (sahte saat); defter: snapshot eski → yenile, `u <= lastUpdateId` atılır, boşluk → yeniden kur, sıfır miktar silme, çapraz defter → yeniden kur, eşzamanlı yeniden kurma sınırı; kline: açık mum yayınlanmaz, boşluk → REST; bozuk JSON / bilinmeyen olay / büyük mesaj → bağlantı yenilenir; host bazlı geri çekilme: piyasa hostundan 429 imzalı hostu engellemez; context iptalinde tüm goroutine'ler `WaitGroup` ile zaman sınırında biter. Fuzz: olay ayrıştırıcı, sabit nokta dönüşümü |
 | 16 | Doğrulama | Ortak komutlar |
@@ -465,4 +465,5 @@ ADR-005 tek borsa kararı verdi. W9 başlamadan önce yeni bir ADR (gerekçe, ü
 | K-8 | Bir API anahtarının aynı hesaptaki başka anahtarın emrini iptal edebilmesi | W2b `demo-check` (iki Demo anahtarı) |
 | K-9 | `data-api.binance.vision` ağırlığının `api.binance.com` ile paylaşılıp paylaşılmadığı (doküman yalnız "IP bazlı" diyor) | W1b observe: iki hostun `X-MBX-USED-WEIGHT-1M` başlıkları karşılaştırılır |
 | K-10 | `/sapi` uçlarının Demo Mode'da çalışması | W1c/W2b |
+| K-12 | Ping'lere cevap verip veri göndermeyen (donmuş) bir akış: bağlantı korunur, semboller R-9 ile stale olur; ikinci bir veri-sessizliği zaman aşımı gerekip gerekmediği | W1b 24 sa observe (stale süreleri) |
 | K-11 | OTOCO'da çalışan emir için FOK desteği (dolumdan sonra boşluksuz koruma alternatifi) | W2b Demo; olumluysa E-9'a alternatif olarak ayrı karar |

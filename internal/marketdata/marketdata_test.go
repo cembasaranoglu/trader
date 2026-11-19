@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cembasaranoglu/trader/internal/exchange"
+	"github.com/cembasaranoglu/trader/internal/exchange/binance"
 	"github.com/cembasaranoglu/trader/internal/exchange/binance/ws"
 )
 
@@ -342,5 +343,129 @@ func TestKlineGapFillPages(t *testing.T) {
 	}
 	if m.Stats()["BTCUSDT"].BarGapsUnfill != 0 {
 		t.Fatal("complete paged fill must not count a gap")
+	}
+}
+
+// gatedREST blocks KlinesRange until released and records the ranges.
+type gatedREST struct {
+	fakeREST
+	gate chan struct{}
+}
+
+func (g *gatedREST) KlinesRange(ctx context.Context, s exchange.Symbol, interval string, start, end time.Time, limit int) ([]exchange.Kline, error) {
+	select {
+	case <-g.gate:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	g.mu.Lock()
+	g.ranges = append(g.ranges, [2]time.Time{start, end})
+	g.mu.Unlock()
+	var out []exchange.Kline
+	for o := start; !o.After(end); o = o.Add(time.Minute) {
+		out = append(out, exchange.Kline{OpenTime: o, CloseTime: o.Add(time.Minute - time.Millisecond),
+			Open: rat("1"), High: rat("1"), Low: rat("1"), Close: rat("1"), Volume: rat("1"), QuoteVol: rat("1")})
+	}
+	return out, nil
+}
+
+// A second gap among the bars that arrive while a fill runs is filled too
+// (review finding: 10:00, 10:03 → fill, then 10:04, 10:06 must not skip 10:05).
+func TestGapInsidePendingBarsIsFilled(t *testing.T) {
+	t.Parallel()
+	rest := &gatedREST{gate: make(chan struct{})}
+	clk := &clock{t: t0}
+	sk := &sink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	m, err := New(ctx, Config{Symbols: []exchange.Symbol{{Name: "BTCUSDT"}}, Intervals: []string{"1m"}, DepthLimit: 100,
+		MaxDataAge: time.Second, Now: clk.Now}, rest, sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); m.Wait() }()
+	for _, min := range []int{0, 3, 4, 6} {
+		m.Handle(msg(kline(t0.Add(time.Duration(min)*time.Minute), true), clk.Now()))
+	}
+	close(rest.gate)
+	eventually(t, func() bool { return sk.barCount() == 7 })
+	sk.mu.Lock()
+	defer sk.mu.Unlock()
+	for i, b := range sk.bars {
+		if !b.OpenTime.Equal(t0.Add(time.Duration(i)*time.Minute)) || b.GapBefore {
+			t.Fatalf("bar %d: %s gap=%v", i, b.OpenTime.Format("15:04"), b.GapBefore)
+		}
+	}
+	if m.Stats()["BTCUSDT"].BarGapsUnfill != 0 {
+		t.Fatal("all gaps were fillable")
+	}
+}
+
+// Cancelling during a fill must not report a false unfilled gap.
+func TestCancelDuringFillCountsNoGap(t *testing.T) {
+	t.Parallel()
+	rest := &gatedREST{gate: make(chan struct{})}
+	clk := &clock{t: t0}
+	sk := &sink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	m, err := New(ctx, Config{Symbols: []exchange.Symbol{{Name: "BTCUSDT"}}, Intervals: []string{"1m"}, DepthLimit: 100,
+		MaxDataAge: time.Second, Now: clk.Now}, rest, sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Handle(msg(kline(t0, true), clk.Now()))
+	m.Handle(msg(kline(t0.Add(3*time.Minute), true), clk.Now()))
+	cancel()
+	m.Wait()
+	if st := m.Stats()["BTCUSDT"]; st.BarGapsUnfill != 0 || sk.barCount() != 1 {
+		t.Fatalf("unfilled %d bars %d", st.BarGapsUnfill, sk.barCount())
+	}
+}
+
+// budgetREST refuses the first klines call with a WeightBudgetError.
+type budgetREST struct {
+	pagingREST
+	refused bool
+}
+
+func (b *budgetREST) KlinesRange(ctx context.Context, s exchange.Symbol, interval string, start, end time.Time, limit int) ([]exchange.Kline, error) {
+	b.mu.Lock()
+	first := !b.refused
+	b.refused = true
+	b.mu.Unlock()
+	if first {
+		return nil, &binance.WeightBudgetError{Wait: 30 * time.Millisecond}
+	}
+	return b.pagingREST.KlinesRange(ctx, s, interval, start, end, limit)
+}
+
+func TestWeightBudgetWaitDoesNotUseRetries(t *testing.T) {
+	t.Parallel()
+	rest := &budgetREST{}
+	clk := &clock{t: t0}
+	sk := &sink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	m, err := New(ctx, Config{Symbols: []exchange.Symbol{{Name: "BTCUSDT"}}, Intervals: []string{"1m"}, DepthLimit: 100,
+		MaxDataAge: time.Second, GapFillRetries: 1, Now: clk.Now}, rest, sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); m.Wait() }()
+	m.Handle(msg(kline(t0, true), clk.Now()))
+	m.Handle(msg(kline(t0.Add(2*time.Minute), true), clk.Now()))
+	eventually(t, func() bool { return sk.barCount() == 3 })
+	if m.Stats()["BTCUSDT"].BarGapsUnfill != 0 {
+		t.Fatal("a budget wait must not exhaust the single retry")
+	}
+}
+
+func TestBookViewCarriesStale(t *testing.T) {
+	t.Parallel()
+	rest := &fakeREST{depthID: 10}
+	m, _, clk, _ := newManager(t, rest)
+	m.Handle(msg(&ws.DepthEvent{Symbol: "BTCUSDT", FirstUpdateID: 10, FinalUpdateID: 11}, clk.Now()))
+	eventually(t, func() bool { v, _ := m.Book("BTCUSDT", 1); return !v.Stale })
+	clk.Advance(6 * time.Second)
+	if v, _ := m.Book("BTCUSDT", 1); !v.Stale || len(v.Bids) == 0 {
+		t.Fatalf("live but old book must carry Stale with its levels: %+v", v)
 	}
 }

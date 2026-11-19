@@ -40,6 +40,23 @@ func FuzzBookInvariants(f *testing.F) {
 				b.Retry()
 			}
 			if b.State() == Live {
+				// The cached best prices must equal a full scan.
+				bid, ask, okB, okA := b.best()
+				var sb, sa int64
+				var hb, ha bool
+				for p := range b.bids {
+					if !hb || p > sb {
+						sb, hb = p, true
+					}
+				}
+				for p := range b.asks {
+					if !ha || p < sa {
+						sa, ha = p, true
+					}
+				}
+				if okB != hb || okA != ha || (hb && bid != sb) || (ha && ask != sa) {
+					t.Fatalf("cached best %d/%d (%v/%v) != scan %d/%d (%v/%v)", bid, ask, okB, okA, sb, sa, hb, ha)
+				}
 				if b.crossed() {
 					t.Fatal("live book is crossed")
 				}

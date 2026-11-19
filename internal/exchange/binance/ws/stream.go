@@ -22,6 +22,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,13 +39,17 @@ const (
 	MaxStreams          = 1024
 	DefaultReadTimeout  = 60 * time.Second
 	DefaultRotateAfter  = 23*time.Hour + 50*time.Minute
-	DefaultMaxMessage   = 1 << 20
+	DefaultMaxMessage   = 256 << 10
 	DefaultMinBackoff   = time.Second
 	DefaultMaxBackoff   = 60 * time.Second
 	DefaultDialTimeout  = 15 * time.Second
 	documentedConnLimit = 300
 	documentedConnWin   = 5 * time.Minute
 )
+
+// streamName allows a lower-case symbol and a stream kind such as
+// "depth@100ms" or "kline_1M" (an allow-list, not a deny-list).
+var streamName = regexp.MustCompile(`^[a-z0-9]{1,32}@[A-Za-z0-9_@]{1,32}$`)
 
 // ErrNoStreams is returned when Config.Streams is empty.
 var ErrNoStreams = errors.New("ws: no streams")
@@ -70,13 +75,14 @@ type Config struct {
 
 // Stats are cumulative counters, safe to read concurrently.
 type Stats struct {
-	Dials          atomic.Int64
-	DialErrors     atomic.Int64
-	Disconnects    atomic.Int64
-	Rotations      atomic.Int64
-	ShutdownEvents atomic.Int64
-	Messages       atomic.Int64
-	Malformed      atomic.Int64
+	Dials            atomic.Int64
+	DialErrors       atomic.Int64
+	Disconnects      atomic.Int64
+	Rotations        atomic.Int64 // completed replacements (planned or after serverShutdown)
+	RotationFailures atomic.Int64 // replacement dials or connections that failed
+	ShutdownEvents   atomic.Int64
+	Messages         atomic.Int64
+	Malformed        atomic.Int64
 }
 
 // Handler receives decoded messages from a single goroutine, in arrival order.
@@ -108,8 +114,7 @@ func StreamURL(base string, streams []string) (string, error) {
 	}
 	seen := make(map[string]bool, len(streams))
 	for _, s := range streams {
-		sym, kind, ok := strings.Cut(s, "@")
-		if !ok || sym == "" || kind == "" || sym != strings.ToLower(sym) || strings.ContainsAny(s, "/?&#% ") {
+		if !streamName.MatchString(s) {
 			return "", fmt.Errorf("ws: invalid stream name %q", s)
 		}
 		if seen[s] {
@@ -124,14 +129,15 @@ func StreamURL(base string, streams []string) (string, error) {
 
 // Client runs one combined-stream subscription.
 type Client struct {
-	cfg    Config
-	url    string
-	hc     *http.Client
-	log    *slog.Logger
-	now    func() time.Time
-	budget *Budget
-	nextID atomic.Uint64
-	stats  Stats
+	cfg        Config
+	url        string
+	hc         *http.Client
+	log        *slog.Logger
+	now        func() time.Time
+	budget     *Budget
+	nextID     atomic.Uint64
+	stats      Stats
+	subscribed map[string]bool
 }
 
 // New validates cfg and returns a Client.
@@ -170,8 +176,12 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Budget == nil {
 		cfg.Budget = NewBudget(documentedConnLimit/2, documentedConnWin, cfg.Now)
 	}
+	subscribed := make(map[string]bool, len(cfg.Streams))
+	for _, st := range cfg.Streams {
+		subscribed[st] = true
+	}
 	return &Client{cfg: cfg, url: u, hc: httpx.NoRedirectClient(cfg.HTTPClient, 0), log: cfg.Logger,
-		now: cfg.Now, budget: cfg.Budget}, nil
+		now: cfg.Now, budget: cfg.Budget, subscribed: subscribed}, nil
 }
 
 // Stats returns the client's counters.
@@ -183,136 +193,214 @@ type connEvent struct {
 	err error // non-nil: the connection ended
 }
 
-// Run connects and delivers messages to h until ctx is done. It returns
-// ctx.Err(). Connection failures are retried with jittered exponential
-// backoff; malformed messages close the connection and are retried too.
+// live is one open connection. Its reader starts only after the event loop
+// has registered it, so no event can arrive for an unknown connection.
+type live struct {
+	id     uint64
+	opened time.Time
+	cancel context.CancelFunc
+	conn   *websocket.Conn
+	act    *activity
+	ctx    context.Context
+}
+
+type dialResult struct {
+	l       *live
+	err     error
+	replace bool
+}
+
+// healthyAfter is how long a connection must have lived before the
+// reconnect backoff resets; a server that accepts and drops connections
+// immediately therefore cannot drive a tight reconnect loop.
+const healthyAfter = time.Minute
+
+// Run connects and delivers messages to h until ctx is done; it returns
+// ctx.Err(). Dials run in the background so the event loop keeps reading
+// (and answering pings) while a replacement connects. Initial connections
+// and failed replacements are retried with jittered exponential backoff.
+// Malformed messages close the connection.
 func (c *Client) Run(ctx context.Context, h Handler) error {
-	events := make(chan connEvent, 4096)
+	events := make(chan connEvent, 1024)
+	dials := make(chan dialResult, 1)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type live struct {
-		id     uint64
-		cancel context.CancelFunc
-	}
-	var cur, next *live // next is a replacement that has not delivered a message yet
-	attempt := 0
+	var cur, next *live // next: a replacement that has not delivered a message yet
+	dialing := false
+	attempt, replAttempt := 0, 0
 
-	start := func() (*live, error) {
-		if err := c.budget.Wait(ctx); err != nil {
-			return nil, err
-		}
-		dctx, dcancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
-		act := &activity{}
-		act.touch(c.now())
-		conn, _, err := websocket.Dial(dctx, c.url, &websocket.DialOptions{HTTPClient: c.hc,
-			OnPingReceived: func(context.Context, []byte) bool { act.touch(c.now()); return true }})
-		dcancel()
-		c.stats.Dials.Add(1)
-		if err != nil {
-			c.stats.DialErrors.Add(1)
-			return nil, err
-		}
-		conn.SetReadLimit(c.cfg.MaxMessage)
-		id := c.nextID.Add(1)
-		cctx, ccancel := context.WithCancel(ctx)
+	startDial := func(replace bool) {
+		dialing = true
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.readLoop(cctx, id, conn, act, events)
-		}()
-		return &live{id: id, cancel: ccancel}, nil
-	}
-
-	rotate := time.NewTimer(time.Hour)
-	rotate.Stop()
-	defer rotate.Stop()
-	armRotate := func() {
-		rotate.Stop()
-		rotate.Reset(c.cfg.RotateAfter)
-	}
-
-	for {
-		if cur == nil {
-			l, err := start()
-			if err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
+			l, err := c.dial(ctx)
+			select {
+			case dials <- dialResult{l: l, err: err, replace: replace}:
+			case <-ctx.Done():
+				if l != nil {
+					l.cancel()
+					l.conn.CloseNow()
 				}
-				c.log.Warn("ws dial failed", "attempt", attempt, "err", err)
-				if err := sleep(ctx, c.backoff(attempt)); err != nil {
-					return err
-				}
-				attempt++
-				continue
 			}
-			cur = l
-			armRotate()
-		}
+		}()
+	}
 
+	newTimer := func() *time.Timer {
+		t := time.NewTimer(time.Hour)
+		t.Stop()
+		return t
+	}
+	rotate, retry, replRetry := newTimer(), newTimer(), newTimer()
+	defer rotate.Stop()
+	defer retry.Stop()
+	defer replRetry.Stop()
+	armRotate := func(l *live) {
+		d := c.cfg.RotateAfter - c.now().Sub(l.opened)
+		if d < 0 {
+			d = 0
+		}
+		rotate.Reset(d)
+	}
+	startReader := func(l *live) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.readLoop(l.ctx, &wg, l.id, l.conn, l.act, events)
+		}()
+	}
+	scheduleReplacement := func() {
+		replRetry.Reset(c.backoff(replAttempt))
+		replAttempt++
+	}
+
+	startDial(false)
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-rotate.C:
-			if next == nil {
-				c.stats.Rotations.Add(1)
-				if l, err := start(); err == nil {
-					next = l
-				} else {
-					c.log.Warn("ws planned rotation dial failed; keeping current connection", "err", err)
-					rotate.Reset(time.Minute)
-				}
+
+		case <-retry.C:
+			if cur == nil && !dialing {
+				startDial(false)
 			}
+
+		case <-rotate.C:
+			if cur != nil && next == nil && !dialing {
+				startDial(true)
+			}
+
+		case <-replRetry.C:
+			if cur != nil && next == nil && !dialing {
+				startDial(true)
+			}
+
+		case r := <-dials:
+			dialing = false
+			if r.err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				c.log.Warn("ws dial failed", "replacement", r.replace, "err", r.err)
+				switch {
+				case cur == nil:
+					retry.Reset(c.backoff(attempt))
+					attempt++
+				case r.replace:
+					c.stats.RotationFailures.Add(1)
+					scheduleReplacement()
+				}
+				continue
+			}
+			switch {
+			case cur == nil:
+				cur = r.l
+				startReader(cur)
+				armRotate(cur)
+			case next == nil:
+				next = r.l
+				startReader(next)
+			default:
+				r.l.cancel() // a replacement is already pending
+				r.l.conn.CloseNow()
+			}
+
 		case ev := <-events:
 			if ev.err != nil {
 				switch {
 				case next != nil && ev.id == next.id:
-					// The replacement failed before delivering; retry later.
+					// The replacement failed before delivering; retry it.
 					next.cancel()
 					next = nil
-					rotate.Reset(time.Minute)
+					c.stats.RotationFailures.Add(1)
+					scheduleReplacement()
 				case cur != nil && ev.id == cur.id:
 					c.stats.Disconnects.Add(1)
+					if c.now().Sub(cur.opened) >= healthyAfter {
+						attempt = 0
+					}
 					cur.cancel()
 					if next != nil {
 						cur, next = next, nil // promote the replacement
-						armRotate()
-					} else {
-						cur = nil
-						if !errors.Is(ev.err, context.Canceled) {
-							c.log.Warn("ws connection ended", "err", ev.err)
-						}
-						if err := sleep(ctx, c.backoff(attempt)); err != nil {
-							return err
-						}
+						c.stats.Rotations.Add(1)
+						replAttempt = 0
+						armRotate(cur)
+						continue
+					}
+					cur = nil
+					if !errors.Is(ev.err, context.Canceled) {
+						c.log.Warn("ws connection ended", "err", ev.err)
+					}
+					if !dialing {
+						retry.Reset(c.backoff(attempt))
 						attempt++
 					}
 				}
 				continue
 			}
-			attempt = 0
 			if next != nil && ev.id == next.id && cur != nil {
 				// The replacement is delivering: retire the old connection.
 				cur.cancel()
 				cur, next = next, nil
-				armRotate()
+				c.stats.Rotations.Add(1)
+				replAttempt = 0
+				armRotate(cur)
 			}
 			if _, ok := ev.msg.Event.(*ServerShutdownEvent); ok {
 				c.stats.ShutdownEvents.Add(1)
-				if next == nil && cur != nil && ev.id == cur.id {
-					if l, err := start(); err == nil {
-						next = l
-					} else {
-						c.log.Warn("ws replacement after serverShutdown failed", "err", err)
-					}
+				if cur != nil && ev.id == cur.id && next == nil && !dialing {
+					replRetry.Stop()
+					startDial(true)
 				}
 			}
 			c.stats.Messages.Add(1)
 			h(*ev.msg)
 		}
 	}
+}
+
+// dial waits for the connection budget and connects. The caller starts the reader.
+func (c *Client) dial(ctx context.Context) (*live, error) {
+	if err := c.budget.Wait(ctx); err != nil {
+		return nil, err
+	}
+	act := &activity{}
+	act.touch(c.now())
+	dctx, dcancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
+	conn, _, err := websocket.Dial(dctx, c.url, &websocket.DialOptions{HTTPClient: c.hc,
+		OnPingReceived: func(context.Context, []byte) bool { act.touch(c.now()); return true }})
+	dcancel()
+	c.stats.Dials.Add(1)
+	if err != nil {
+		c.stats.DialErrors.Add(1)
+		return nil, err
+	}
+	conn.SetReadLimit(c.cfg.MaxMessage)
+	cctx, ccancel := context.WithCancel(ctx)
+	return &live{id: c.nextID.Add(1), opened: c.now(), cancel: ccancel, conn: conn, act: act, ctx: cctx}, nil
 }
 
 // activity records the last time a connection showed life: a data message
@@ -328,7 +416,7 @@ func (a *activity) since(t time.Time) time.Duration {
 // errIdle reports a connection with no data and no ping for ReadTimeout.
 var errIdle = errors.New("ws: no data or ping within the read timeout")
 
-func (c *Client) readLoop(ctx context.Context, id uint64, conn *websocket.Conn, act *activity, out chan<- connEvent) {
+func (c *Client) readLoop(ctx context.Context, wg *sync.WaitGroup, id uint64, conn *websocket.Conn, act *activity, out chan<- connEvent) {
 	defer conn.CloseNow()
 	send := func(ev connEvent) bool {
 		select {
@@ -341,7 +429,9 @@ func (c *Client) readLoop(ctx context.Context, id uint64, conn *websocket.Conn, 
 	rctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	// Watchdog: close the connection when it has been idle for ReadTimeout.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		tick := c.cfg.ReadTimeout / 4
 		if tick < 10*time.Millisecond {
 			tick = 10 * time.Millisecond
@@ -376,6 +466,9 @@ func (c *Client) readLoop(ctx context.Context, id uint64, conn *websocket.Conn, 
 			return
 		}
 		stream, ev, err := Decode(b)
+		if err == nil && stream != "!serverShutdown" && !c.subscribed[stream] {
+			err = fmt.Errorf("%w: message for unsubscribed stream %q", ErrMalformed, clip(stream))
+		}
 		if err != nil {
 			c.stats.Malformed.Add(1)
 			send(connEvent{id: id, err: err})

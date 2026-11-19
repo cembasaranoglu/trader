@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,5 +390,123 @@ func TestPingsKeepQuietConnectionAlive(t *testing.T) {
 	time.Sleep(800 * time.Millisecond)
 	if d := c.Stats().Disconnects.Load(); d != 0 || fs.conns.Load() != 1 {
 		t.Fatalf("pinged connection was replaced: disconnects %d, connections %d", d, fs.conns.Load())
+	}
+}
+
+// While the replacement waits for the connection budget, the current
+// connection must keep delivering (the event loop must not block).
+func TestReplacementDoesNotBlockDelivery(t *testing.T) {
+	t.Parallel()
+	fs := newFakeServer(t, func(ctx context.Context, idx int, c *websocket.Conn) {
+		_ = send(ctx, c, shutdownMsg)
+		for i := 1; ctx.Err() == nil; i++ {
+			if send(ctx, c, fmt.Sprintf(aggTradeMsg, i)) != nil {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+	col := newCollector()
+	budget := NewBudget(1, time.Hour, nil) // the replacement can never get a slot
+	runClient(t, Config{URL: fs.wsURL(), Streams: []string{"btcusdt@aggTrade"}, Budget: budget}, col.handle)
+	col.wait(t, func(m Message) bool { ev, ok := m.Event.(*AggTradeEvent); return ok && ev.AggID >= 50 })
+}
+
+// A failed replacement after serverShutdown is retried with backoff.
+func TestFailedReplacementIsRetried(t *testing.T) {
+	t.Parallel()
+	fs := newFakeServer(t, func(ctx context.Context, idx int, c *websocket.Conn) {
+		switch idx {
+		case 1:
+			_ = send(ctx, c, shutdownMsg)
+			for i := 1; ctx.Err() == nil; i++ {
+				if send(ctx, c, fmt.Sprintf(aggTradeMsg, i)) != nil {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		case 2:
+			c.Close(websocket.StatusInternalError, "replacement fails")
+		default:
+			for i := 5000; ctx.Err() == nil; i++ {
+				_ = send(ctx, c, fmt.Sprintf(aggTradeMsg, i))
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	})
+	col := newCollector()
+	c, _, _ := runClient(t, Config{URL: fs.wsURL(), Streams: []string{"btcusdt@aggTrade"}}, col.handle)
+	col.wait(t, func(m Message) bool { ev, ok := m.Event.(*AggTradeEvent); return ok && ev.AggID >= 5000 })
+	if c.Stats().RotationFailures.Load() < 1 || c.Stats().Rotations.Load() != 1 {
+		t.Fatalf("failures %d rotations %d", c.Stats().RotationFailures.Load(), c.Stats().Rotations.Load())
+	}
+}
+
+func TestConsecutiveShutdowns(t *testing.T) {
+	t.Parallel()
+	fs := newFakeServer(t, func(ctx context.Context, idx int, c *websocket.Conn) {
+		if idx <= 2 {
+			_ = send(ctx, c, shutdownMsg)
+		}
+		for i := idx * 1000; ctx.Err() == nil; i++ {
+			if send(ctx, c, fmt.Sprintf(aggTradeMsg, i)) != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	col := newCollector()
+	c, _, _ := runClient(t, Config{URL: fs.wsURL(), Streams: []string{"btcusdt@aggTrade"}}, col.handle)
+	col.wait(t, func(m Message) bool { ev, ok := m.Event.(*AggTradeEvent); return ok && ev.AggID >= 3000 })
+	if c.Stats().Rotations.Load() != 2 {
+		t.Fatalf("rotations %d", c.Stats().Rotations.Load())
+	}
+}
+
+func TestUnsubscribedStreamRejected(t *testing.T) {
+	t.Parallel()
+	fs := newFakeServer(t, func(ctx context.Context, idx int, c *websocket.Conn) {
+		if idx == 1 {
+			_ = send(ctx, c, strings.Replace(fmt.Sprintf(aggTradeMsg, 1), "btcusdt@aggTrade", "ethusdt@aggTrade", 1))
+		} else {
+			_ = send(ctx, c, fmt.Sprintf(aggTradeMsg, 2))
+		}
+		c.CloseRead(ctx)
+		<-ctx.Done()
+	})
+	col := newCollector()
+	c, _, _ := runClient(t, Config{URL: fs.wsURL(), Streams: []string{"btcusdt@aggTrade"}}, col.handle)
+	col.wait(t, func(m Message) bool { return m.Event.(*AggTradeEvent).AggID == 2 })
+	if c.Stats().Malformed.Load() != 1 {
+		t.Fatalf("malformed %d", c.Stats().Malformed.Load())
+	}
+}
+
+func TestNoGoroutineLeak(t *testing.T) {
+	// Not parallel: counts process goroutines.
+	before := runtime.NumGoroutine()
+	fs := newFakeServer(t, func(ctx context.Context, idx int, c *websocket.Conn) {
+		_ = send(ctx, c, fmt.Sprintf(aggTradeMsg, 1))
+		c.CloseRead(ctx)
+		<-ctx.Done()
+	})
+	col := newCollector()
+	c, err := New(Config{URL: fs.wsURL(), Streams: []string{"btcusdt@aggTrade"}, MinBackoff: 10 * time.Millisecond, MaxBackoff: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx, col.handle); close(done) }()
+	col.wait(t, func(Message) bool { return true })
+	cancel()
+	<-done
+	fs.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for runtime.NumGoroutine() > before+2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before+2 {
+		t.Fatalf("goroutines before %d, after %d", before, n)
 	}
 }

@@ -38,6 +38,10 @@ func TestDecodeEvents(t *testing.T) {
 	if err != nil || ev.(*ServerShutdownEvent).ShutdownTime != time.UnixMilli(1700000600000).UTC() {
 		t.Fatalf("%v %+v", err, ev)
 	}
+	// The raw (non-combined) form is documented too.
+	if stream, ev, err := Decode([]byte(`{"e":"serverShutdown","E":1770123456789,"T":1770124000000}`)); err != nil || stream != "!serverShutdown" || ev.(*ServerShutdownEvent).EventTime.IsZero() {
+		t.Fatalf("raw serverShutdown: %v %q", err, stream)
+	}
 	// T is optional (added in a later API version).
 	if _, _, err := Decode([]byte(`{"stream":"!serverShutdown","data":{"e":"serverShutdown","E":1}}`)); err != nil {
 		t.Fatal(err)

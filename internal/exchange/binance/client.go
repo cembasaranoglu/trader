@@ -10,13 +10,16 @@
 // servers), redirects are never followed, every body is size-limited, and a
 // JSON null body is an error.
 //
-// Rate limiting: a 429/418 backs off only the host that returned it, so a
-// market-data ban never blocks signed requests such as cancels. Requests to
-// the market-data host are refused locally (ErrWeightBudget) when they would
-// push the last reported X-MBX-USED-WEIGHT-1M above MarketWeightShare of the
-// request-weight limit learned from exchangeInfo; the remainder is headroom
-// for the signed (order and cancel) path. Whether the two hosts share one
-// weight counter is not documented (the docs say limits are per IP).
+// Rate limiting: requests belong to a class, market data or signed. A
+// 429/418 backs off only the class (and host) that received it, so a
+// market-data ban never blocks signed requests such as cancels, even when
+// both classes use the same host (Demo Mode). Market-data requests are
+// refused locally with a *WeightBudgetError when they would push the
+// reported X-MBX-USED-WEIGHT-1M above MarketWeightShare of the limit learned
+// from exchangeInfo; the remainder is headroom for orders and cancels.
+// Admitted weight is reserved locally until the next response reports the
+// usage. Whether different hosts share one counter is not documented (the
+// docs say limits are per IP).
 package binance
 
 import (
@@ -65,6 +68,27 @@ var (
 	ErrBadResponse      = errors.New("binance: malformed response")
 	ErrClockSkew        = errors.New("binance: clock skew too large")
 	ErrWeightBudget     = errors.New("binance: market-data request weight budget exhausted")
+)
+
+// WeightBudgetError reports a market-data request refused locally; Wait is
+// how long until the usage reading expires.
+type WeightBudgetError struct {
+	Used, Weight, Budget, Limit int
+	Wait                        time.Duration
+}
+
+// Error implements error.
+func (e *WeightBudgetError) Error() string {
+	return fmt.Sprintf("%v: used %d + %d > %d of %d, retry in %s", ErrWeightBudget, e.Used, e.Weight, e.Budget, e.Limit, e.Wait)
+}
+
+// Unwrap returns ErrWeightBudget.
+func (e *WeightBudgetError) Unwrap() error { return ErrWeightBudget }
+
+// Request classes for backoff and weight budgeting.
+const (
+	classMarket = "market"
+	classSigned = "signed"
 )
 
 // MarketWeightShare is the fraction of the per-minute request-weight limit
@@ -225,7 +249,7 @@ type Client struct {
 	now          func() time.Time
 
 	mu           sync.Mutex
-	blockedUntil map[string]time.Time // per host
+	blockedUntil map[string]time.Time // per host and class
 	offset       time.Duration        // server minus local clock, set by SyncTime
 	usage        map[string]map[string]string
 	usedWeight   map[string]weightReading // per host, from X-MBX-USED-WEIGHT-1M
@@ -291,11 +315,17 @@ func (c *Client) MarketDataHost() string { return c.market.Host }
 // SignedHost returns the host of signed endpoints.
 func (c *Client) SignedHost() string { return c.base.Host }
 
-// BlockedUntilHost returns the backoff end for one host.
+// BlockedUntilHost returns the latest backoff end of any class on one host.
 func (c *Client) BlockedUntilHost(host string) time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.blockedUntil[host]
+	var latest time.Time
+	for _, class := range []string{classMarket, classSigned} {
+		if t := c.blockedUntil[host+"|"+class]; t.After(latest) {
+			latest = t
+		}
+	}
+	return latest
 }
 
 // SetRequestWeightLimit sets the per-minute request-weight limit used for
@@ -368,11 +398,16 @@ type request struct {
 // get performs a GET and decodes a 2XX JSON body into dst.
 func (c *Client) get(ctx context.Context, r request, dst any) error {
 	host := r.host.Host
-	if err := c.checkBackoff(host); err != nil {
+	class := classSigned
+	if r.host == c.market {
+		class = classMarket
+	}
+	key := host + "|" + class
+	if err := c.checkBackoff(key); err != nil {
 		return err
 	}
-	if host == c.market.Host && host != c.base.Host {
-		if err := c.checkWeight(host, r.weight); err != nil {
+	if class == classMarket {
+		if err := c.admitWeight(host, r.weight); err != nil {
 			return err
 		}
 	}
@@ -425,7 +460,7 @@ func (c *Client) get(ctx context.Context, r request, dst any) error {
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusTeapot:
 		ra := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
-		c.setBackoff(host, ra)
+		c.setBackoff(key, ra)
 		return &RateLimitError{Status: resp.StatusCode, RetryAfter: ra}
 	case resp.StatusCode >= 300 && resp.StatusCode <= 399:
 		return fmt.Errorf("binance: GET %s: HTTP %d: %w", r.path, resp.StatusCode, httpx.ErrRedirect)
@@ -450,26 +485,28 @@ func (c *Client) get(ctx context.Context, r request, dst any) error {
 	return nil
 }
 
-func (c *Client) checkBackoff(host string) error {
+func (c *Client) checkBackoff(key string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if until := c.blockedUntil[host]; c.now().Before(until) {
-		return fmt.Errorf("%w (%s) until %s", ErrBackoff, host, until.UTC().Format(time.RFC3339))
+	if until := c.blockedUntil[key]; c.now().Before(until) {
+		return fmt.Errorf("%w (%s) until %s", ErrBackoff, key, until.UTC().Format(time.RFC3339))
 	}
 	return nil
 }
 
-func (c *Client) setBackoff(host string, d time.Duration) {
+func (c *Client) setBackoff(key string, d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if until := c.now().Add(d); until.After(c.blockedUntil[host]) {
-		c.blockedUntil[host] = until
+	if until := c.now().Add(d); until.After(c.blockedUntil[key]) {
+		c.blockedUntil[key] = until
 	}
 }
 
-// checkWeight refuses a market-data request that would exceed the budget.
-// With no known limit or no recent reading the request is allowed.
-func (c *Client) checkWeight(host string, weight int) error {
+// admitWeight refuses a market-data request that would exceed the budget and
+// otherwise reserves its weight in the current reading, so concurrent
+// requests see each other. With no known limit or no recent reading the
+// request is allowed.
+func (c *Client) admitWeight(host string, weight int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	rd, ok := c.usedWeight[host]
@@ -478,8 +515,11 @@ func (c *Client) checkWeight(host string, weight int) error {
 	}
 	budget := int(float64(c.weightLimit) * MarketWeightShare)
 	if rd.used+weight > budget {
-		return fmt.Errorf("%w: used %d + %d > %d of %d", ErrWeightBudget, rd.used, weight, budget, c.weightLimit)
+		return &WeightBudgetError{Used: rd.used, Weight: weight, Budget: budget, Limit: c.weightLimit,
+			Wait: usedWeightTTL - c.now().Sub(rd.at)}
 	}
+	rd.used += weight
+	c.usedWeight[host] = rd
 	return nil
 }
 
@@ -496,7 +536,14 @@ func (c *Client) recordUsage(host string, h http.Header) {
 		}
 		if lk == "x-mbx-used-weight-1m" && len(v) > 0 {
 			if n, err := strconv.Atoi(strings.TrimSpace(v[0])); err == nil && n >= 0 {
-				c.usedWeight[host] = weightReading{used: n, at: c.now()}
+				// A lower value than the current reading (plus local
+				// reservations) is accepted only in a new minute: a late
+				// response must not hide requests already admitted.
+				now := c.now()
+				old, ok := c.usedWeight[host]
+				if !ok || n >= old.used || now.Truncate(time.Minute) != old.at.Truncate(time.Minute) {
+					c.usedWeight[host] = weightReading{used: n, at: now}
+				}
 			}
 		}
 	}
