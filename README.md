@@ -2,7 +2,7 @@
 
 LLM destekli, kripto spot piyasasında (Binance TR, TRY pariteleri) çalışan bir işlem sistemi. LLM ajanları yalnızca şemalı öneri üretir. Emirlere deterministik Go çekirdeğindeki risk motoru karar verir.
 
-> **Durum:** Wave W0. Bu sürümde yalnızca konfigürasyon yükleyici ve doğrulayıcı var. Borsa bağlantısı, emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz.
+> **Durum:** Wave W1a. Konfigürasyon doğrulayıcı ve Binance TR için salt okuma istemcisi (saat, sembol kuralları, piyasa verisi, hesap bayrakları) var. Emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz.
 >
 > Bu yazılım yatırım tavsiyesi değildir. Kâr garantisi yoktur.
 
@@ -20,6 +20,28 @@ go build ./cmd/traderd
 ```
 
 Çıkış kodları: `0` konfigürasyon geçerli, `1` geçersiz (her sorun ayrı satırda listelenir), `2` kullanım hatası.
+
+## Binance TR doğrulaması (`venuecheck`)
+
+`venuecheck`, dokümandan doğrulanamayan Binance TR bilgilerini canlı API'de ölçer ve paylaşılabilir bir JSON rapor üretir. Raporda sır ve bakiye tutarı yoktur. Varsayılan ayarlarla en fazla 11 istek yapar, istekler arasında 250 ms bekler.
+
+Yalnızca herkese açık veri:
+
+```sh
+go run ./cmd/venuecheck -symbols BTC_TRY,ETH_TRY -out venuecheck-report.json
+```
+
+Hesap bayraklarını da ölçmek için (yalnız okuma yetkili anahtar):
+
+```sh
+mkdir -p ~/.config/trader
+# Dosyayı bir editörle oluştur; anahtarı terminal geçmişine yazma:
+#   {"api_key": "...", "secret_key": "..."}
+chmod 600 ~/.config/trader/binance_tr.json
+go run ./cmd/venuecheck -credentials ~/.config/trader/binance_tr.json -out venuecheck-report.json
+```
+
+Dosya grup veya diğer kullanıcılar tarafından okunabiliyorsa komut çalışmaz. Ayrıntılar: [docs/exchanges/binance-tr.md](docs/exchanges/binance-tr.md).
 
 ## Konfigürasyon
 

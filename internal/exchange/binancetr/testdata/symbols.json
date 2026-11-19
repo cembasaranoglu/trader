@@ -1,0 +1,45 @@
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "list": [
+      {
+        "type": 1,
+        "symbol": "BTC_TRY",
+        "baseAsset": "BTC",
+        "basePrecision": 8,
+        "quoteAsset": "TRY",
+        "quotePrecision": 8,
+        "filters": [
+          {"applyToMarket": false, "filterType": "PRICE_FILTER", "maxPrice": "100000000.00000000", "minPrice": "1.00000000", "tickSize": "1.00000000"},
+          {"applyToMarket": false, "avgPriceMins": "5", "filterType": "PERCENT_PRICE", "multiplierDown": 0.2, "multiplierUp": 5},
+          {"applyToMarket": false, "filterType": "LOT_SIZE", "maxQty": "9000.00000000", "minQty": "0.00001000", "stepSize": "0.00001000"},
+          {"applyToMarket": true, "avgPriceMins": "5", "filterType": "NOTIONAL", "minNotional": "100.00000000"},
+          {"applyToMarket": false, "filterType": "MARKET_LOT_SIZE", "maxQty": "100.00000000", "minQty": "0.00000000", "stepSize": "0.00000000"}
+        ],
+        "orderTypes": ["LIMIT", "LIMIT_MAKER", "MARKET", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT"],
+        "defaultSelfTradePreventionMode": "EXPIRE_MAKER",
+        "allowedSelfTradePreventionModes": ["EXPIRE_TAKER", "EXPIRE_MAKER", "EXPIRE_BOTH"],
+        "icebergEnable": 1,
+        "ocoEnable": 1,
+        "spotTradingEnable": 1,
+        "marginTradingEnable": 0
+      },
+      {
+        "type": 2,
+        "symbol": "NEW_TRY",
+        "baseAsset": "NEW",
+        "quoteAsset": "TRY",
+        "filters": [
+          {"applyToMarket": false, "filterType": "PRICE_FILTER", "maxPrice": "1000.00", "minPrice": "0.01", "tickSize": "0.01"},
+          {"applyToMarket": false, "filterType": "LOT_SIZE", "maxQty": "1000000", "minQty": "1", "stepSize": "1"},
+          {"applyToMarket": false, "filterType": "MIN_NOTIONAL", "minNotional": "50"}
+        ],
+        "orderTypes": ["LIMIT", "MARKET"],
+        "ocoEnable": 0,
+        "spotTradingEnable": 0
+      }
+    ]
+  },
+  "timestamp": 1571921637091
+}
