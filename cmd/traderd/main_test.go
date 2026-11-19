@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,11 @@ func TestRun(t *testing.T) {
 		wantStderr string
 	}{
 		{"valid example", []string{"-config", "../../configs/example.yaml"}, 0, "configuration ok: mode=paper venue=binance quote=USDT", ""},
-		{"missing flag", nil, 2, "", "usage: traderd -config <file>"},
+		{"missing flag", nil, 2, "", "usage:"},
+		{"explicit validate", []string{"validate", "-config", "../../configs/example.yaml"}, 0, "configuration ok", ""},
+		{"unknown command", []string{"trade"}, 2, "", "unknown command"},
+		{"observe without symbols", []string{"observe", "-config", "../../configs/example.yaml"}, 2, "", "usage:"},
+		{"observe duration too long", []string{"observe", "-config", "../../configs/example.yaml", "-symbols", "BTCUSDT", "-duration", "200h"}, 2, "", "usage:"},
 		{"extra argument", []string{"-config", "x.yaml", "extra"}, 2, "", "usage:"},
 		{"unknown flag", []string{"-nope"}, 2, "", "flag provided but not defined"},
 		{"missing file", []string{"-config", filepath.Join(dir, "none.yaml")}, 1, "", "no such file"},
@@ -33,7 +38,7 @@ func TestRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr bytes.Buffer
-			code := run(tc.args, &stdout, &stderr)
+			code := run(context.Background(), tc.args, &stdout, &stderr)
 			if code != tc.wantCode {
 				t.Fatalf("exit code: got %d, want %d (stderr: %s)", code, tc.wantCode, stderr.String())
 			}

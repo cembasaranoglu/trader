@@ -1,44 +1,65 @@
 // Command traderd is the trading process.
 //
-// It currently only loads and validates the configuration, then exits; the
-// trading runtime is added wave by wave (docs/plan/01-waves.md).
-// Exit codes: 0 valid, 1 invalid configuration, 2 usage error.
+// Subcommands:
+//
+//	traderd [validate] -config <file>          validate the configuration (default)
+//	traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]
+//	                                           stream market data and report its health
+//
+// The trading runtime is added wave by wave (docs/plan/01-waves.md).
+// Exit codes: 0 success, 1 failure (invalid configuration, setup error),
+// 2 usage error.
 package main
 
 import (
+	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 
 	"github.com/cembasaranoglu/trader/internal/config"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("traderd", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	path := fs.String("config", "", "path to the YAML configuration file (required)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *path == "" || fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: traderd -config <file>")
-		return 2
-	}
+const usage = `usage:
+  traderd [validate] -config <file>
+  traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]`
 
-	cfg, err := config.LoadFile(*path)
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	cmd := "validate"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		cmd, args = args[0], args[1:]
+	}
+	switch cmd {
+	case "validate":
+		return runValidate(args, stdout, stderr)
+	case "observe":
+		return runObserve(ctx, args, stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown command %q\n%s\n", cmd, usage)
+		return 2
+	}
+}
+
+// loadConfig loads and validates the configuration, printing every problem.
+func loadConfig(path string, stderr io.Writer) (*config.Config, bool) {
+	cfg, err := config.LoadFile(path)
 	if err != nil {
 		fmt.Fprintln(stderr, "configuration is invalid:")
 		printErrors(stderr, err)
-		return 1
+		return nil, false
 	}
-	fmt.Fprintf(stdout, "configuration ok: mode=%s venue=%s quote=%s\n", cfg.Mode, cfg.Venue.Primary, cfg.QuoteCurrency)
-	return 0
+	return cfg, true
 }
 
 // printErrors prints one line per joined error.

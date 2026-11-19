@@ -100,6 +100,9 @@ func TestLoadFileExample(t *testing.T) {
 		{"thesis_escalations", cfg.Agents.Thesis.MaxEscalationsPerDay, 2},
 		{"reflection", cfg.Agents.Reflection.Enabled, true},
 		{"g2_days", cfg.Gates.G2MinDays, 180},
+		{"depth_limit", cfg.MarketData.DepthLimit, 1000},
+		{"intervals", strings.Join(cfg.MarketData.KlineIntervals, ","), "1m,1h,4h,1d"},
+		{"reconnect_backoff", cfg.MarketData.ReconnectMaxBackoff, 60 * time.Second},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -168,6 +171,15 @@ func TestLoadRejects(t *testing.T) {
 		{"string for bool", func(t *testing.T, m map[string]any) { set(t, m, "agents.critic.enabled", "true") }, config.ErrDecode, ""},
 		{"whitespace model id", func(t *testing.T, m map[string]any) { set(t, m, "llm.models.synthesis", "   ") }, config.ErrInvalid, "llm.models.synthesis"},
 		{"padded model id", func(t *testing.T, m map[string]any) { set(t, m, "llm.models.synthesis", " claude-sonnet-5-5") }, config.ErrInvalid, "llm.models.synthesis"},
+		{"missing marketdata", func(t *testing.T, m map[string]any) { del(t, m, "marketdata") }, config.ErrMissing, "marketdata"},
+		{"depth limit 0", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.depth_limit", 0) }, config.ErrInvalid, "marketdata.depth_limit"},
+		{"depth limit 5001", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.depth_limit", 5001) }, config.ErrInvalid, "marketdata.depth_limit"},
+		{"no intervals", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.kline_intervals", []any{}) }, config.ErrInvalid, "marketdata.kline_intervals"},
+		{"unsupported interval", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.kline_intervals", []any{"2m"}) }, config.ErrInvalid, "marketdata.kline_intervals"},
+		{"duplicate interval", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.kline_intervals", []any{"1m", "1m"}) }, config.ErrInvalid, "marketdata.kline_intervals"},
+		{"intervals not a list", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.kline_intervals", "1m") }, config.ErrDecode, ""},
+		{"backoff 0", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.reconnect_max_backoff_s", 0) }, config.ErrInvalid, "marketdata.reconnect_max_backoff_s"},
+		{"backoff 301", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.reconnect_max_backoff_s", 301) }, config.ErrInvalid, "marketdata.reconnect_max_backoff_s"},
 		{"gross plus reserve above 100", func(t *testing.T, m map[string]any) { set(t, m, "risk.cash_reserve_pct", 25) }, config.ErrInvalid, "risk.max_gross_exposure_pct"},
 	}
 	for _, tc := range tests {

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -259,6 +260,29 @@ func (c *checker) build(r *rawConfig) *Config {
 		cfg.Ops = Ops{
 			MaxClockSkew:     time.Duration(c.intIn("ops.max_clock_skew_ms", r.Ops.MaxClockSkewMs, 1, maxSkewMs)) * time.Millisecond,
 			HeartbeatTimeout: time.Duration(c.intIn("ops.heartbeat_timeout_s", r.Ops.HeartbeatTimeoutS, 1, maxHeartbeatS)) * time.Second,
+		}
+	}
+	if present(c, "marketdata", r.MarketData) {
+		md := r.MarketData
+		cfg.MarketData = MarketData{
+			DepthLimit:          c.intIn("marketdata.depth_limit", md.DepthLimit, 1, 5000),
+			ReconnectMaxBackoff: time.Duration(c.intIn("marketdata.reconnect_max_backoff_s", md.ReconnectMaxBackoff, 1, 300)) * time.Second,
+		}
+		if present(c, "marketdata.kline_intervals", md.KlineIntervals) {
+			ivs := *md.KlineIntervals
+			if len(ivs) == 0 {
+				c.invalid("marketdata.kline_intervals", "must list at least one interval")
+			}
+			seen := map[string]bool{}
+			for _, iv := range ivs {
+				if !slices.Contains(KlineIntervals, iv) {
+					c.invalid("marketdata.kline_intervals", "unsupported interval %q", iv)
+				} else if seen[iv] {
+					c.invalid("marketdata.kline_intervals", "duplicate interval %q", iv)
+				}
+				seen[iv] = true
+			}
+			cfg.MarketData.KlineIntervals = slices.Clone(ivs)
 		}
 	}
 	if present(c, "llm", r.LLM) {

@@ -402,7 +402,8 @@ func TestUsageAndSecretsNeverPrinted(t *testing.T) {
 	if _, err := c.ServerTime(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if u := c.Usage(); u["x-mbx-used-weight-1m"] != "21" || u["x-sapi-used-ip-weight-1m"] != "1" {
+	h := c.SignedHost()
+	if u := c.Usage(); u[h+" x-mbx-used-weight-1m"] != "21" || u[h+" x-sapi-used-ip-weight-1m"] != "1" {
 		t.Fatalf("usage %v", u)
 	}
 

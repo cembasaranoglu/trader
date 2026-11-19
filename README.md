@@ -2,7 +2,7 @@
 
 LLM destekli, kripto spot piyasasında (binance.com, USDT pariteleri) çalışan bir işlem sistemi. LLM ajanları yalnızca şemalı öneri üretir. Emirlere deterministik Go çekirdeğindeki risk motoru karar verir.
 
-> **Durum:** Wave W1a tamam. Konfigürasyon doğrulayıcı, binance.com salt okuma REST istemcisi (saat senkronu, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri) ve `venuecheck` tanı aracı var. WebSocket, emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz. Sıradaki işler: [docs/plan/01-waves.md](docs/plan/01-waves.md).
+> **Durum:** W1a tamam, W1b (WebSocket piyasa verisi) kodlandı; canlı 24 saatlik doğrulama bekliyor. Konfigürasyon doğrulayıcı, binance.com salt okuma REST istemcisi (saat senkronu, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri), `venuecheck` tanı aracı ve WebSocket piyasa verisi (`traderd observe`) var. Emir gönderme, depolama ve LLM katmanı **yok**. Sistem para ile işlem yapmaz. Sıradaki işler: [docs/plan/01-waves.md](docs/plan/01-waves.md).
 >
 > Bu yazılım yatırım tavsiyesi değildir. Kâr garantisi yoktur.
 
@@ -48,6 +48,16 @@ binance.com'da anahtarın yetkileri (`/sapi/v1/account/apiRestrictions`) da okun
 Kimlik dosyası kuralları: Linux/macOS'ta kimlik dosyası ve Ed25519 anahtar dosyası sembolik bağlantı olamaz, çalıştıran kullanıcıya ait olmalı ve yalnız sahibi okuyabilmeli (`chmod 600`); aksi halde komut çalışmaz. Windows'ta dosya erişim listesi (ACL) kontrol edilemez; komut bunu uyarı olarak yazar. Göreli `ed25519_private_key_file` yolu kimlik dosyasının bulunduğu klasöre göre çözülür. Şifreli (parolalı) Ed25519 anahtarları desteklenmez.
 
 Ayrıntılar: [docs/exchanges/binance.md](docs/exchanges/binance.md), [docs/exchanges/binance-tr.md](docs/exchanges/binance-tr.md).
+
+## Piyasa verisi gözlemi (`traderd observe`)
+
+WebSocket piyasa verisini (kapanmış mumlar, en iyi fiyat, işlemler, yerel emir defteri) belirli bir süre çalıştırır ve dakikada bir JSON satırı yazar: defter yeniden kurmaları, boşluklar, REST ile doldurulan mumlar, stale süresi, bağlantı devirleri, iki hostun ağırlık başlıkları. Anahtar gerekmez.
+
+```sh
+go run ./cmd/traderd observe -config configs/example.yaml -symbols BTCUSDT,ETHUSDT,SOLUSDT -duration 24h -out observe.jsonl
+```
+
+Son satır `"type":"final"` özetidir; aynı özet ekrana da yazılır. Ctrl-C ile erken durdurulursa özet `"interrupted":true` ile yazılır.
 
 ## Konfigürasyon
 

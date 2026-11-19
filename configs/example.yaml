@@ -45,6 +45,11 @@ ops:
   max_clock_skew_ms: 500
   heartbeat_timeout_s: 30
 
+marketdata:
+  depth_limit: 1000             # REST snapshot levels; weight 50 (1001-5000 costs 250)
+  kline_intervals: [1m, 1h, 4h, 1d]   # initial set; W3 research may change it
+  reconnect_max_backoff_s: 60
+
 llm:
   cost_cap_pct_of_capital: 1    # D-13: live cap = this % of current capital per month
   rnd_monthly_cap_usd: 50       # D-16: paper / R&D cap

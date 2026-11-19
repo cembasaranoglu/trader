@@ -52,6 +52,7 @@ type Config struct {
 	Risk          Risk
 	Execution     Execution
 	Ops           Ops
+	MarketData    MarketData
 	LLM           LLM
 	Agents        Agents
 	Learning      Learning
@@ -111,6 +112,16 @@ type Ops struct {
 	MaxClockSkew     time.Duration
 	HeartbeatTimeout time.Duration
 }
+
+// MarketData configures the market-data stream (W1b).
+type MarketData struct {
+	DepthLimit          int           // REST depth snapshot levels, 1..5000
+	KlineIntervals      []string      // streamed kline intervals, unique
+	ReconnectMaxBackoff time.Duration // upper bound of the stream reconnect delay
+}
+
+// KlineIntervals are the intervals Binance spot supports (enums.md).
+var KlineIntervals = []string{"1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
 
 // LLM holds model selection and cost caps.
 type LLM struct {

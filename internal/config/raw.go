@@ -12,17 +12,18 @@ import (
 // missing key can be told apart from a zero value.
 
 type rawConfig struct {
-	Mode          *string       `yaml:"mode"`
-	Venue         *rawVenue     `yaml:"venue"`
-	QuoteCurrency *string       `yaml:"quote_currency"`
-	Capital       *rawCapital   `yaml:"capital"`
-	Risk          *rawRisk      `yaml:"risk"`
-	Execution     *rawExecution `yaml:"execution"`
-	Ops           *rawOps       `yaml:"ops"`
-	LLM           *rawLLM       `yaml:"llm"`
-	Agents        *rawAgents    `yaml:"agents"`
-	Learning      *rawLearning  `yaml:"learning"`
-	Gates         *rawGates     `yaml:"gates"`
+	Mode          *string        `yaml:"mode"`
+	Venue         *rawVenue      `yaml:"venue"`
+	QuoteCurrency *string        `yaml:"quote_currency"`
+	Capital       *rawCapital    `yaml:"capital"`
+	Risk          *rawRisk       `yaml:"risk"`
+	Execution     *rawExecution  `yaml:"execution"`
+	Ops           *rawOps        `yaml:"ops"`
+	MarketData    *rawMarketData `yaml:"marketdata"`
+	LLM           *rawLLM        `yaml:"llm"`
+	Agents        *rawAgents     `yaml:"agents"`
+	Learning      *rawLearning   `yaml:"learning"`
+	Gates         *rawGates      `yaml:"gates"`
 }
 
 type rawVenue struct {
@@ -70,6 +71,12 @@ type rawExecution struct {
 type rawOps struct {
 	MaxClockSkewMs    *yamlInt `yaml:"max_clock_skew_ms"`
 	HeartbeatTimeoutS *yamlInt `yaml:"heartbeat_timeout_s"`
+}
+
+type rawMarketData struct {
+	DepthLimit          *yamlInt  `yaml:"depth_limit"`
+	KlineIntervals      *[]string `yaml:"kline_intervals"`
+	ReconnectMaxBackoff *yamlInt  `yaml:"reconnect_max_backoff_s"`
 }
 
 type rawLLM struct {

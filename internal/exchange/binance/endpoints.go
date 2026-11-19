@@ -19,7 +19,7 @@ func (c *Client) ServerTime(ctx context.Context) (time.Time, error) {
 	var v struct {
 		ServerTime *int64 `json:"serverTime"`
 	}
-	if err := c.get(ctx, request{host: c.base, path: "/api/v3/time"}, &v); err != nil {
+	if err := c.get(ctx, request{host: c.base, path: "/api/v3/time", weight: 1}, &v); err != nil {
 		return time.Time{}, err
 	}
 	if v.ServerTime == nil || *v.ServerTime <= 0 {
@@ -69,10 +69,21 @@ func (c *Client) Symbols(ctx context.Context, names ...string) ([]exchange.Symbo
 		q.Set("symbols", string(b))
 	}
 	var v struct {
+		RateLimits []struct {
+			Type        string `json:"rateLimitType"`
+			Interval    string `json:"interval"`
+			IntervalNum int    `json:"intervalNum"`
+			Limit       int    `json:"limit"`
+		} `json:"rateLimits"`
 		Symbols []wireSymbol `json:"symbols"`
 	}
-	if err := c.get(ctx, request{host: c.market, path: "/api/v3/exchangeInfo", query: q}, &v); err != nil {
+	if err := c.get(ctx, request{host: c.market, path: "/api/v3/exchangeInfo", query: q, weight: 20}, &v); err != nil {
 		return nil, err
+	}
+	for _, rl := range v.RateLimits {
+		if rl.Type == "REQUEST_WEIGHT" && rl.Interval == "MINUTE" && rl.IntervalNum == 1 {
+			c.SetRequestWeightLimit(rl.Limit)
+		}
 	}
 	if len(v.Symbols) == 0 {
 		return nil, fmt.Errorf("%w: exchangeInfo has no symbols", ErrBadResponse)
@@ -175,7 +186,7 @@ func (c *Client) Tickers24h(ctx context.Context) ([]exchange.Ticker, error) {
 		LastPrice   string `json:"lastPrice"`
 		QuoteVolume string `json:"quoteVolume"`
 	}
-	if err := c.get(ctx, request{host: c.market, path: "/api/v3/ticker/24hr", query: url.Values{"type": {"MINI"}}}, &v); err != nil {
+	if err := c.get(ctx, request{host: c.market, path: "/api/v3/ticker/24hr", query: url.Values{"type": {"MINI"}}, weight: 80}, &v); err != nil {
 		return nil, err
 	}
 	if len(v) == 0 {
@@ -210,7 +221,7 @@ func (c *Client) Depth(ctx context.Context, s exchange.Symbol, limit int) (excha
 		Asks         [][2]string `json:"asks"`
 	}
 	q := url.Values{"symbol": {s.Name}, "limit": {strconv.Itoa(limit)}}
-	if err := c.get(ctx, request{host: c.market, path: "/api/v3/depth", query: q}, &w); err != nil {
+	if err := c.get(ctx, request{host: c.market, path: "/api/v3/depth", query: q, weight: DepthWeight(limit)}, &w); err != nil {
 		return exchange.OrderBook{}, err
 	}
 	if w.LastUpdateID == nil || w.Bids == nil || w.Asks == nil {
@@ -225,6 +236,20 @@ func (c *Client) Depth(ctx context.Context, s exchange.Symbol, limit int) (excha
 		return exchange.OrderBook{}, fmt.Errorf("%w: asks: %v", ErrBadResponse, err)
 	}
 	return ob, nil
+}
+
+// DepthWeight returns the documented request weight of GET /api/v3/depth.
+func DepthWeight(limit int) int {
+	switch {
+	case limit <= 100:
+		return 5
+	case limit <= 500:
+		return 25
+	case limit <= 1000:
+		return 50
+	default:
+		return 250
+	}
 }
 
 func levels(raw [][2]string) ([]exchange.Level, error) {
@@ -255,9 +280,30 @@ func (c *Client) Klines(ctx context.Context, s exchange.Symbol, interval string,
 	if !slices.Contains(klineIntervals, interval) {
 		return nil, fmt.Errorf("binance: unsupported klines interval %q", interval)
 	}
-	var rows [][]json.RawMessage
 	q := url.Values{"symbol": {s.Name}, "interval": {interval}, "limit": {strconv.Itoa(limit)}}
-	if err := c.get(ctx, request{host: c.market, path: "/api/v3/klines", query: q}, &rows); err != nil {
+	return c.klines(ctx, q)
+}
+
+// KlinesRange returns candles whose open time is in [start, end], oldest
+// first, at most limit (1..1000). Klines are identified by their open time.
+func (c *Client) KlinesRange(ctx context.Context, s exchange.Symbol, interval string, start, end time.Time, limit int) ([]exchange.Kline, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("binance: klines limit %d not in [1, 1000]", limit)
+	}
+	if !slices.Contains(klineIntervals, interval) {
+		return nil, fmt.Errorf("binance: unsupported klines interval %q", interval)
+	}
+	if start.IsZero() || end.Before(start) {
+		return nil, fmt.Errorf("binance: invalid klines range %s..%s", start, end)
+	}
+	q := url.Values{"symbol": {s.Name}, "interval": {interval}, "limit": {strconv.Itoa(limit)},
+		"startTime": {strconv.FormatInt(start.UnixMilli(), 10)}, "endTime": {strconv.FormatInt(end.UnixMilli(), 10)}}
+	return c.klines(ctx, q)
+}
+
+func (c *Client) klines(ctx context.Context, q url.Values) ([]exchange.Kline, error) {
+	var rows [][]json.RawMessage
+	if err := c.get(ctx, request{host: c.market, path: "/api/v3/klines", query: q, weight: 2}, &rows); err != nil {
 		return nil, err
 	}
 	out := make([]exchange.Kline, 0, len(rows))
@@ -335,7 +381,7 @@ func (c *Client) Account(ctx context.Context) (exchange.AccountInfo, error) {
 		} `json:"balances"`
 	}
 	q := url.Values{"omitZeroBalances": {"true"}}
-	if err := c.get(ctx, request{host: c.base, path: "/api/v3/account", query: q, signed: true}, &w); err != nil {
+	if err := c.get(ctx, request{host: c.base, path: "/api/v3/account", query: q, signed: true, weight: 20}, &w); err != nil {
 		return exchange.AccountInfo{}, err
 	}
 	if w.CanTrade == nil || w.CanWithdraw == nil || w.CanDeposit == nil || w.CommissionRates == nil || w.Balances == nil {
@@ -378,7 +424,7 @@ var requiredKeyFlags = [...]string{"ipRestrict", "enableReading", "enableSpotAnd
 // newly added permission is visible instead of silently ignored.
 func (c *Client) KeyPermissions(ctx context.Context) (exchange.KeyPermissions, error) {
 	var raw map[string]json.RawMessage
-	if err := c.get(ctx, request{host: c.base, path: "/sapi/v1/account/apiRestrictions", signed: true}, &raw); err != nil {
+	if err := c.get(ctx, request{host: c.base, path: "/sapi/v1/account/apiRestrictions", signed: true, weight: 1}, &raw); err != nil {
 		return exchange.KeyPermissions{}, err
 	}
 	flags := make(map[string]bool, len(requiredKeyFlags))
