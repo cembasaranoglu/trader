@@ -86,6 +86,9 @@ func (c *collector) wait(t *testing.T, pred func(Message) bool) Message {
 func runClient(t *testing.T, cfg Config, h Handler) (*Client, context.CancelFunc, <-chan error) {
 	t.Helper()
 	cfg.MinBackoff, cfg.MaxBackoff = 10*time.Millisecond, 20*time.Millisecond
+	if cfg.HandoverGrace == 0 {
+		cfg.HandoverGrace = 20 * time.Millisecond
+	}
 	c, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -115,8 +118,8 @@ func TestDeliversAndAnswersPing(t *testing.T) {
 			defer cancel()
 			pinged <- c.Ping(pctx) // succeeds only if the client answers with a pong
 		}()
-		c.CloseRead(ctx)
-		<-ctx.Done()
+		rctx := c.CloseRead(ctx)
+		<-rctx.Done()
 	})
 	col := newCollector()
 	runClient(t, Config{URL: fs.wsURL(), Streams: []string{"btcusdt@aggTrade"}}, col.handle)
@@ -224,7 +227,7 @@ func TestMalformedAndOversizedMessagesReconnect(t *testing.T) {
 				} else {
 					_ = send(ctx, c, fmt.Sprintf(aggTradeMsg, 7))
 				}
-				c.CloseRead(ctx)
+				ctx = c.CloseRead(ctx)
 				<-ctx.Done()
 			})
 			col := newCollector()
@@ -262,7 +265,7 @@ func TestDialRedirectRefused(t *testing.T) {
 func TestRunReturnsOnCancel(t *testing.T) {
 	t.Parallel()
 	fs := newFakeServer(t, func(ctx context.Context, idx int, c *websocket.Conn) {
-		c.CloseRead(ctx)
+		ctx = c.CloseRead(ctx)
 		<-ctx.Done()
 	})
 	_, cancel, done := runClient(t, Config{URL: fs.wsURL(), Streams: []string{"btcusdt@aggTrade"}}, func(Message) {})
@@ -315,6 +318,10 @@ func TestNewValidation(t *testing.T) {
 	t.Parallel()
 	for name, cfg := range map[string]Config{
 		"rotate at 24h":     {Streams: []string{"a@aggTrade"}, RotateAfter: 24 * time.Hour},
+		"grace >= rotate":   {Streams: []string{"a@aggTrade"}, RotateAfter: time.Second, HandoverGrace: time.Second},
+		"grace too long":    {Streams: []string{"a@aggTrade"}, HandoverGrace: MaxHandover + 1},
+		"handover past 24h": {Streams: []string{"a@aggTrade"}, RotateAfter: 24*time.Hour - 10*time.Second},
+		"negative grace":    {Streams: []string{"a@aggTrade"}, HandoverGrace: -1},
 		"backoff inverted":  {Streams: []string{"a@aggTrade"}, MinBackoff: time.Minute, MaxBackoff: time.Second},
 		"negative timeout":  {Streams: []string{"a@aggTrade"}, ReadTimeout: -1},
 		"negative max size": {Streams: []string{"a@aggTrade"}, MaxMessage: -1},
@@ -471,7 +478,7 @@ func TestUnsubscribedStreamRejected(t *testing.T) {
 		} else {
 			_ = send(ctx, c, fmt.Sprintf(aggTradeMsg, 2))
 		}
-		c.CloseRead(ctx)
+		ctx = c.CloseRead(ctx)
 		<-ctx.Done()
 	})
 	col := newCollector()
@@ -487,7 +494,7 @@ func TestNoGoroutineLeak(t *testing.T) {
 	before := runtime.NumGoroutine()
 	fs := newFakeServer(t, func(ctx context.Context, idx int, c *websocket.Conn) {
 		_ = send(ctx, c, fmt.Sprintf(aggTradeMsg, 1))
-		c.CloseRead(ctx)
+		ctx = c.CloseRead(ctx)
 		<-ctx.Done()
 	})
 	col := newCollector()

@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -24,6 +26,12 @@ import (
 const (
 	maxObserveSymbols  = 50
 	maxObserveDuration = 7 * 24 * time.Hour
+	minRotateAfter     = time.Minute
+	// clockJumpThreshold is the difference between wall-clock and monotonic
+	// elapsed time, within one sampling tick, that counts as a clock jump
+	// (an NTP step, a manual change, or a suspend on systems whose monotonic
+	// clock stops while suspended, such as Linux).
+	clockJumpThreshold = 2 * time.Second
 )
 
 // observeReport is one JSON line of the observe output.
@@ -33,6 +41,8 @@ type observeReport struct {
 	ElapsedSec  int64                   `json:"elapsed_sec"`
 	Interrupted bool                    `json:"interrupted,omitempty"`
 	WS          wsReport                `json:"ws"`
+	Runtime     runtimeReport           `json:"runtime"`
+	Clock       clockReport             `json:"clock"`
 	Symbols     map[string]symbolReport `json:"symbols"`
 	RateLimit   map[string]string       `json:"rate_limit_headers"`
 	Errors      []string                `json:"errors"`
@@ -46,6 +56,30 @@ type wsReport struct {
 	ShutdownEvents int64 `json:"server_shutdown_events"`
 	Messages       int64 `json:"messages"`
 	Malformed      int64 `json:"malformed"`
+	RotationFails  int64 `json:"rotation_failures"`
+	Handovers      int64 `json:"handovers"`
+	RetiredDropped int64 `json:"retired_dropped"`
+	QueueHighWater int64 `json:"queue_high_water"`
+	MaxLagMs       int64 `json:"max_delivery_lag_ms"`
+}
+
+// runtimeReport shows whether the process grows over a long run.
+type runtimeReport struct {
+	Goroutines     int    `json:"goroutines"`
+	HeapAllocBytes uint64 `json:"heap_alloc_bytes"`
+	SysBytes       uint64 `json:"sys_bytes"`
+	NumGC          uint32 `json:"num_gc"`
+	GCPauseTotalMs int64  `json:"gc_pause_total_ms"`
+}
+
+// clockReport counts wall-clock jumps seen while observing (NTP steps,
+// manual changes, and on Linux and macOS a suspend, during which the
+// monotonic clock stops). Freshness and connection idleness are measured on
+// both clocks, the larger age counting, so neither kind of jump makes old
+// data look fresh.
+type clockReport struct {
+	Jumps       int64 `json:"jumps"`
+	JumpSeconds int64 `json:"jump_seconds"`
 }
 
 type symbolReport struct {
@@ -80,6 +114,7 @@ func runObserve(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	path := fs.String("config", "", "path to the YAML configuration file (required)")
 	symbols := fs.String("symbols", "", "comma-separated symbols, e.g. BTCUSDT,ETHUSDT (required)")
 	duration := fs.Duration("duration", 24*time.Hour, "how long to observe (1s..168h)")
+	rotateAfter := fs.Duration("rotate-after", 0, "replace the WebSocket connection after this long (1m..23h50m; default 23h50m)")
 	out := fs.String("out", "", "write JSON lines to this file instead of stdout")
 	baseURL := fs.String("base-url", "", "override the REST signed host (testing)")
 	marketURL := fs.String("market-url", "", "override the REST market-data host (testing)")
@@ -89,7 +124,8 @@ func runObserve(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	names := splitSymbols(*symbols)
 	if *path == "" || fs.NArg() != 0 || len(names) == 0 || len(names) > maxObserveSymbols ||
-		*duration < time.Second || *duration > maxObserveDuration {
+		*duration < time.Second || *duration > maxObserveDuration ||
+		(*rotateAfter != 0 && (*rotateAfter < minRotateAfter || *rotateAfter > ws.DefaultRotateAfter)) {
 		fmt.Fprintln(stderr, usage)
 		return 2
 	}
@@ -98,14 +134,14 @@ func runObserve(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	w, closeOut, err := openOutput(*out, stdout)
+	w, syncOut, closeOut, err := openOutput(*out, stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "observe:", err)
 		return 1
 	}
 	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	code := observe(ctx, observeParams{cfg: cfg.MarketData, maxDataAge: cfg.Risk.MaxDataAge, names: names, duration: *duration,
-		baseURL: *baseURL, marketURL: *marketURL, wsURL: *wsURL, logger: logger}, w, stdout, stderr)
+		rotateAfter: *rotateAfter, baseURL: *baseURL, marketURL: *marketURL, wsURL: *wsURL, logger: logger, sync: syncOut}, w, stdout, stderr)
 	if err := closeOut(); err != nil {
 		fmt.Fprintln(stderr, "observe: close output:", err)
 		return 1
@@ -118,8 +154,10 @@ type observeParams struct {
 	maxDataAge                time.Duration
 	names                     []string
 	duration                  time.Duration
+	rotateAfter               time.Duration
 	baseURL, marketURL, wsURL string
 	logger                    *slog.Logger
+	sync                      func() error // flushes the output to stable storage; nil for none
 }
 
 func observe(ctx context.Context, p observeParams, w io.Writer, stdout, stderr io.Writer) int {
@@ -149,7 +187,8 @@ func observe(ctx context.Context, p observeParams, w io.Writer, stdout, stderr i
 		return 1
 	}
 	mdCfg := marketdata.Config{Symbols: syms, Intervals: p.cfg.KlineIntervals}
-	stream, err := ws.New(ws.Config{URL: p.wsURL, Streams: mdCfg.Streams(), MaxBackoff: p.cfg.ReconnectMaxBackoff, Logger: p.logger})
+	stream, err := ws.New(ws.Config{URL: p.wsURL, Streams: mdCfg.Streams(), MaxBackoff: p.cfg.ReconnectMaxBackoff,
+		RotateAfter: p.rotateAfter, Logger: p.logger})
 	if err != nil {
 		fmt.Fprintln(stderr, "observe:", err)
 		return 1
@@ -172,11 +211,20 @@ func observe(ctx context.Context, p observeParams, w io.Writer, stdout, stderr i
 	defer second.Stop()
 	nextMinute := start.Add(time.Minute)
 	writeErr := error(nil)
+	var clk clockReport
+	emit := func(r observeReport) {
+		if writeErr != nil {
+			return
+		}
+		if writeErr = enc.Encode(r); writeErr == nil && p.sync != nil {
+			writeErr = p.sync()
+		}
+	}
 
 	report := func(typ string, interrupted bool) observeReport {
 		r := observeReport{Type: typ, Time: time.Now().UTC(), ElapsedSec: int64(time.Since(start).Seconds()),
-			Interrupted: interrupted, WS: wsStats(stream.Stats()), Symbols: map[string]symbolReport{},
-			RateLimit: rest.Usage()}
+			Interrupted: interrupted, WS: wsStats(stream.Stats()), Runtime: runtimeStats(), Clock: clk,
+			Symbols: map[string]symbolReport{}, RateLimit: rest.Usage()}
 		errMu.Lock()
 		r.Errors = append([]string{}, errs...)
 		errMu.Unlock()
@@ -198,6 +246,11 @@ loop:
 			break loop
 		case now := <-second.C:
 			elapsed := now.Sub(lastTick)
+			if j := clockJump(lastTick, now); j != 0 {
+				clk.Jumps++
+				clk.JumpSeconds += int64(j.Abs().Seconds())
+				p.logger.Warn("wall clock jumped", "seconds", j.Seconds())
+			}
 			lastTick = now
 			md.RetrySnapshots()
 			for _, name := range md.Symbols() {
@@ -222,9 +275,7 @@ loop:
 						errMu.Unlock()
 					}
 				}()
-				if writeErr == nil {
-					writeErr = enc.Encode(report("minute", false))
-				}
+				emit(report("minute", false))
 			}
 		}
 	}
@@ -233,15 +284,22 @@ loop:
 	wg.Wait()
 	md.Wait()
 	final := report("final", interrupted)
-	if writeErr == nil {
-		writeErr = enc.Encode(final)
-	}
+	emit(final)
 	if writeErr != nil {
 		fmt.Fprintln(stderr, "observe: write report:", writeErr)
 		return 1
 	}
 	fmt.Fprintln(stdout, summaryLine(final))
 	return 0
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func splitSymbols(s string) []string {
@@ -267,7 +325,32 @@ func missingSymbols(want []string, got []exchange.Symbol) []string {
 
 func wsStats(s *ws.Stats) wsReport {
 	return wsReport{Dials: s.Dials.Load(), DialErrors: s.DialErrors.Load(), Disconnects: s.Disconnects.Load(),
-		Rotations: s.Rotations.Load(), ShutdownEvents: s.ShutdownEvents.Load(), Messages: s.Messages.Load(), Malformed: s.Malformed.Load()}
+		Rotations: s.Rotations.Load(), ShutdownEvents: s.ShutdownEvents.Load(), Messages: s.Messages.Load(), Malformed: s.Malformed.Load(),
+		RotationFails: s.RotationFailures.Load(), Handovers: s.Handovers.Load(), RetiredDropped: s.RetiredDropped.Load(),
+		QueueHighWater: s.QueueHighWater.Load(),
+		MaxLagMs:       time.Duration(s.MaxDeliveryLagNs.Load()).Milliseconds()}
+}
+
+func runtimeStats() runtimeReport {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return runtimeReport{Goroutines: runtime.NumGoroutine(), HeapAllocBytes: ms.HeapAlloc, SysBytes: ms.Sys,
+		NumGC: ms.NumGC, GCPauseTotalMs: time.Duration(ms.PauseTotalNs).Milliseconds()}
+}
+
+// clockJump returns how far the wall clock moved beyond the monotonic clock
+// between prev and now, or 0 when the difference is within
+// clockJumpThreshold. Both times must come from time.Now (with a monotonic
+// reading).
+func clockJump(prev, now time.Time) time.Duration {
+	return jumpOf(now.Sub(prev), now.Round(0).Sub(prev.Round(0)))
+}
+
+func jumpOf(mono, wall time.Duration) time.Duration {
+	if d := wall - mono; d.Abs() > clockJumpThreshold {
+		return d
+	}
+	return 0
 }
 
 func ageMs(now, t time.Time) int64 {
@@ -305,15 +388,25 @@ func summaryLine(r observeReport) string {
 	return b.String()
 }
 
-// openOutput returns stdout or a newly created file and a close function
-// that reports the file's close error.
-func openOutput(path string, stdout io.Writer) (io.Writer, func() error, error) {
+// openOutput returns stdout or a newly created file, a sync function (nil
+// for stdout) and a close function that reports the file's close error.
+// Each report line is synced so that a crash or power loss keeps every line
+// written before it.
+func openOutput(path string, stdout io.Writer) (io.Writer, func() error, func() error, error) {
 	if path == "" {
-		return stdout, func() error { return nil }, nil
+		return stdout, nil, func() error { return nil }, nil
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return f, f.Close, nil
+	// Sync the directory once so the new file's entry survives a power loss.
+	// Windows cannot sync a directory handle; there the file sync suffices.
+	if runtime.GOOS != "windows" {
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			f.Close()
+			return nil, nil, nil, fmt.Errorf("sync directory of %s: %w", path, err)
+		}
+	}
+	return f, f.Sync, f.Close, nil
 }

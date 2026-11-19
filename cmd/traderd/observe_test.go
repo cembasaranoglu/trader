@@ -103,6 +103,9 @@ func TestObserveEndToEnd(t *testing.T) {
 	if final.WS.Dials < 1 || final.WS.Malformed != 0 {
 		t.Fatalf("ws report %+v", final.WS)
 	}
+	if final.WS.QueueHighWater < 1 || final.Runtime.Goroutines < 1 || final.Runtime.HeapAllocBytes == 0 || final.Clock.Jumps != 0 {
+		t.Fatalf("ws %+v runtime %+v clock %+v", final.WS, final.Runtime, final.Clock)
+	}
 	if !strings.Contains(stdout.String(), "BTCUSDT book=live") {
 		t.Fatalf("summary: %s", stdout.String())
 	}
@@ -129,5 +132,39 @@ func TestObserveInterrupted(t *testing.T) {
 		"-duration", "1h", "-base-url", restURL, "-market-url", restURL, "-ws-url", wsURL}, &stdout, &stderr)
 	if code != 0 || !strings.Contains(stdout.String(), `"interrupted":true`) {
 		t.Fatalf("exit %d stdout %s stderr %s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestObserveRotateAfterBounds(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{"30s", "24h", "-1m"} {
+		var stdout, stderr bytes.Buffer
+		code := run(context.Background(), []string{"observe", "-config", "../../configs/example.yaml", "-symbols", "BTCUSDT",
+			"-duration", "1s", "-rotate-after", v}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("-rotate-after %s: exit %d, want 2", v, code)
+		}
+	}
+}
+
+func TestClockJump(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		mono, wall, want time.Duration
+	}{
+		{time.Second, time.Second, 0},
+		{time.Second, 3 * time.Second, 0}, // exactly at the threshold
+		{time.Second, 3*time.Second + time.Millisecond, 2*time.Second + time.Millisecond},
+		{time.Second, time.Hour + time.Second, time.Hour},  // suspend or forward step
+		{time.Second, -9 * time.Second, -10 * time.Second}, // backward step
+	}
+	for _, c := range cases {
+		if got := jumpOf(c.mono, c.wall); got != c.want {
+			t.Errorf("jumpOf(%v, %v) = %v, want %v", c.mono, c.wall, got, c.want)
+		}
+	}
+	prev := time.Now()
+	if j := clockJump(prev, prev.Add(time.Second)); j != 0 {
+		t.Fatalf("no jump expected, got %v", j)
 	}
 }

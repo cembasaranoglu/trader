@@ -10,7 +10,7 @@
 //
 // Run keeps one connection alive and replaces it before the 24-hour limit or
 // when the server announces a shutdown. During a replacement the old and the
-// new connection overlap briefly, so consumers must tolerate duplicates
+// new connection overlap (see Run), so consumers must tolerate duplicates
 // (order book update IDs, kline open times, aggregate trade IDs).
 package ws
 
@@ -43,6 +43,9 @@ const (
 	DefaultMinBackoff   = time.Second
 	DefaultMaxBackoff   = 60 * time.Second
 	DefaultDialTimeout  = 15 * time.Second
+	DefaultHandover     = time.Second
+	MaxHandover         = 5 * time.Second
+	documentedConnLife  = 24 * time.Hour
 	documentedConnLimit = 300
 	documentedConnWin   = 5 * time.Minute
 )
@@ -65,6 +68,9 @@ type Config struct {
 	MinBackoff  time.Duration
 	MaxBackoff  time.Duration
 	DialTimeout time.Duration
+	// HandoverGrace is how long both connections are read after the
+	// replacement delivers its first message (see Run).
+	HandoverGrace time.Duration
 	// Budget limits connection attempts; nil selects a budget of half the
 	// documented 300 attempts per 5 minutes. Share one Budget between all
 	// connections from the same IP.
@@ -83,6 +89,41 @@ type Stats struct {
 	ShutdownEvents   atomic.Int64
 	Messages         atomic.Int64
 	Malformed        atomic.Int64
+	// QueueHighWater is the largest number of received messages waiting for
+	// the handler (capacity 1024). It rises when the handler is slower than
+	// the stream, and briefly while the messages held during a handover are
+	// replayed. A full queue stops reading; the server's pings then go
+	// unanswered and the connection is eventually dropped.
+	QueueHighWater atomic.Int64
+	// MaxDeliveryLagNs is the largest delay between reading a message and
+	// handing it to the handler, in nanoseconds. Held handover messages are
+	// excluded; messages queued behind a replay include the replay time.
+	MaxDeliveryLagNs atomic.Int64
+	// Handovers counts replacements that started delivering (grace started).
+	Handovers atomic.Int64
+	// RetiredDropped counts messages from an already replaced connection
+	// that were still queued; the replacement carries the same data.
+	RetiredDropped atomic.Int64
+}
+
+// queueCap is the capacity of the queue between readers and the handler.
+const queueCap = 1024
+
+// The replacement's messages held during the handover grace are bounded by
+// count and by raw size; when either fills, the handover completes early.
+const (
+	maxHandoverMessages = 16384
+	maxHandoverBytes    = 32 << 20
+)
+
+// storeMax raises v to x if x is larger.
+func storeMax(v *atomic.Int64, x int64) {
+	for {
+		old := v.Load()
+		if x <= old || v.CompareAndSwap(old, x) {
+			return
+		}
+	}
 }
 
 // Handler receives decoded messages from a single goroutine, in arrival order.
@@ -156,16 +197,25 @@ func New(cfg Config) (*Client, error) {
 	def(&cfg.MinBackoff, DefaultMinBackoff)
 	def(&cfg.MaxBackoff, DefaultMaxBackoff)
 	def(&cfg.DialTimeout, DefaultDialTimeout)
+	def(&cfg.HandoverGrace, DefaultHandover)
 	if cfg.MaxMessage == 0 {
 		cfg.MaxMessage = DefaultMaxMessage
 	}
 	switch {
-	case cfg.ReadTimeout < 0, cfg.RotateAfter < 0, cfg.MinBackoff < 0, cfg.DialTimeout < 0, cfg.MaxMessage < 0:
+	case cfg.ReadTimeout < 0, cfg.RotateAfter < 0, cfg.MinBackoff < 0, cfg.DialTimeout < 0, cfg.MaxMessage < 0, cfg.HandoverGrace < 0:
 		return nil, errors.New("ws: negative durations or sizes are not allowed")
 	case cfg.MaxBackoff < cfg.MinBackoff:
 		return nil, errors.New("ws: MaxBackoff must be >= MinBackoff")
 	case cfg.RotateAfter >= 24*time.Hour:
 		return nil, errors.New("ws: RotateAfter must be below the documented 24h connection limit")
+	case cfg.HandoverGrace > MaxHandover:
+		return nil, fmt.Errorf("ws: HandoverGrace must be at most %v", MaxHandover)
+	case cfg.HandoverGrace >= cfg.RotateAfter:
+		return nil, errors.New("ws: HandoverGrace must be below RotateAfter")
+	case cfg.RotateAfter+cfg.DialTimeout+cfg.HandoverGrace >= documentedConnLife:
+		// The old connection stays open until the replacement has dialled
+		// and the grace has passed; all of it must fit in Binance's 24h.
+		return nil, errors.New("ws: RotateAfter + DialTimeout + HandoverGrace must be below the documented 24h connection limit")
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -188,9 +238,10 @@ func New(cfg Config) (*Client, error) {
 func (c *Client) Stats() *Stats { return &c.stats }
 
 type connEvent struct {
-	id  uint64
-	msg *Message
-	err error // non-nil: the connection ended
+	id   uint64
+	msg  *Message
+	size int   // raw message size in bytes
+	err  error // non-nil: the connection ended
 }
 
 // live is one open connection. Its reader starts only after the event loop
@@ -220,15 +271,30 @@ const healthyAfter = time.Minute
 // (and answering pings) while a replacement connects. Initial connections
 // and failed replacements are retried with jittered exponential backoff.
 // Malformed messages close the connection.
+//
+// Handover: the replacement starts streaming from the moment it subscribes,
+// while the old connection may still have older messages in flight. Run
+// therefore keeps delivering the old connection and holds the replacement's
+// messages for HandoverGrace after its first message (or until
+// maxHandoverMessages or maxHandoverBytes are held), then closes the old
+// connection, delivers the held messages and drops whatever the old
+// connection still had queued. A consumer that drops ids it has already
+// seen then loses nothing, provided the old connection lags the new one by
+// less than HandoverGrace. If the old connection ends first, the
+// replacement is promoted at once. While the grace runs, new data comes only
+// from the old connection; if it falls silent, delivery pauses for at most
+// HandoverGrace (capped at MaxHandover).
 func (c *Client) Run(ctx context.Context, h Handler) error {
-	events := make(chan connEvent, 1024)
+	events := make(chan connEvent, queueCap)
 	dials := make(chan dialResult, 1)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var cur, next *live // next: a replacement that has not delivered a message yet
+	var cur, next *live // next: a replacement that has not been promoted yet
+	var held []*Message // next's messages during the handover grace
+	heldBytes := 0
 	dialing := false
 	attempt, replAttempt := 0, 0
 
@@ -254,10 +320,11 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 		t.Stop()
 		return t
 	}
-	rotate, retry, replRetry := newTimer(), newTimer(), newTimer()
+	rotate, retry, replRetry, grace := newTimer(), newTimer(), newTimer(), newTimer()
 	defer rotate.Stop()
 	defer retry.Stop()
 	defer replRetry.Stop()
+	defer grace.Stop()
 	armRotate := func(l *live) {
 		d := c.cfg.RotateAfter - c.now().Sub(l.opened)
 		if d < 0 {
@@ -275,6 +342,40 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 	scheduleReplacement := func() {
 		replRetry.Reset(c.backoff(replAttempt))
 		replAttempt++
+	}
+	deliver := func(id uint64, m *Message, direct bool) {
+		if _, ok := m.Event.(*ServerShutdownEvent); ok {
+			c.stats.ShutdownEvents.Add(1)
+			if cur != nil && id == cur.id && next == nil && !dialing {
+				replRetry.Stop()
+				startDial(true)
+			}
+		}
+		c.stats.Messages.Add(1)
+		if direct {
+			// Held messages are delayed by design; only direct deliveries
+			// measure the handler's backlog.
+			storeMax(&c.stats.QueueHighWater, int64(len(events))+1)
+			storeMax(&c.stats.MaxDeliveryLagNs, int64(c.now().Sub(m.Received)))
+		}
+		h(*m)
+	}
+	// promote makes next the current connection (closing the old one if it
+	// is still open) and delivers the messages held during the grace.
+	promote := func() {
+		grace.Stop()
+		if cur != nil {
+			cur.cancel()
+		}
+		cur, next = next, nil
+		c.stats.Rotations.Add(1)
+		replAttempt = 0
+		armRotate(cur)
+		pending := held
+		held, heldBytes = nil, 0
+		for _, m := range pending {
+			deliver(cur.id, m, false)
+		}
 	}
 
 	startDial(false)
@@ -296,6 +397,11 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 		case <-replRetry.C:
 			if cur != nil && next == nil && !dialing {
 				startDial(true)
+			}
+
+		case <-grace.C:
+			if next != nil && len(held) > 0 {
+				promote()
 			}
 
 		case r := <-dials:
@@ -332,9 +438,13 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 			if ev.err != nil {
 				switch {
 				case next != nil && ev.id == next.id:
-					// The replacement failed before delivering; retry it.
+					// The replacement failed before promotion; its held
+					// messages are dropped (the old connection carries the
+					// same data) and the replacement is retried.
 					next.cancel()
 					next = nil
+					held, heldBytes = nil, 0
+					grace.Stop()
 					c.stats.RotationFailures.Add(1)
 					scheduleReplacement()
 				case cur != nil && ev.id == cur.id:
@@ -344,10 +454,8 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 					}
 					cur.cancel()
 					if next != nil {
-						cur, next = next, nil // promote the replacement
-						c.stats.Rotations.Add(1)
-						replAttempt = 0
-						armRotate(cur)
+						cur = nil
+						promote()
 						continue
 					}
 					cur = nil
@@ -361,23 +469,28 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 				}
 				continue
 			}
-			if next != nil && ev.id == next.id && cur != nil {
-				// The replacement is delivering: retire the old connection.
-				cur.cancel()
-				cur, next = next, nil
-				c.stats.Rotations.Add(1)
-				replAttempt = 0
-				armRotate(cur)
-			}
-			if _, ok := ev.msg.Event.(*ServerShutdownEvent); ok {
-				c.stats.ShutdownEvents.Add(1)
-				if cur != nil && ev.id == cur.id && next == nil && !dialing {
-					replRetry.Stop()
-					startDial(true)
+			// next exists only while cur does: when cur ends, next is
+			// promoted at once.
+			if next != nil && ev.id == next.id {
+				if len(held) == 0 {
+					c.stats.Handovers.Add(1)
+					grace.Reset(c.cfg.HandoverGrace)
 				}
+				held = append(held, ev.msg)
+				heldBytes += ev.size
+				if len(held) >= maxHandoverMessages || heldBytes >= maxHandoverBytes {
+					promote()
+				}
+				continue
 			}
-			c.stats.Messages.Add(1)
-			h(*ev.msg)
+			if cur == nil || ev.id != cur.id {
+				// Still queued from a connection that has been replaced:
+				// the current connection delivers the same and later data,
+				// and delivering these would move consumers backwards.
+				c.stats.RetiredDropped.Add(1)
+				continue
+			}
+			deliver(ev.id, ev.msg, true)
 		}
 	}
 }
@@ -387,8 +500,7 @@ func (c *Client) dial(ctx context.Context) (*live, error) {
 	if err := c.budget.Wait(ctx); err != nil {
 		return nil, err
 	}
-	act := &activity{}
-	act.touch(c.now())
+	act := newActivity(c.now())
 	dctx, dcancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
 	conn, _, err := websocket.Dial(dctx, c.url, &websocket.DialOptions{HTTPClient: c.hc,
 		OnPingReceived: func(context.Context, []byte) bool { act.touch(c.now()); return true }})
@@ -406,11 +518,38 @@ func (c *Client) dial(ctx context.Context) (*live, error) {
 // activity records the last time a connection showed life: a data message
 // or a server ping. The server pings every 20 seconds, so a quiet stream
 // (no market changes) is not mistaken for a dead connection.
-type activity struct{ last atomic.Int64 }
+//
+// Idle time is measured on both clocks and the larger value counts:
+//   - monotonic (offset from base, which carries Go's monotonic reading when
+//     it comes from time.Now): a backward wall-clock step cannot hide a dead
+//     connection;
+//   - wall clock (UnixNano): on Linux and macOS the monotonic clock stops
+//     while the machine is suspended, so after a resume only the wall clock
+//     shows that the connection has been silent.
+//
+// A forward wall-clock step larger than the read timeout therefore causes
+// one unnecessary reconnect, which is the safe direction.
+type activity struct {
+	base     time.Time
+	lastMono atomic.Int64 // nanoseconds since base
+	lastWall atomic.Int64 // Unix nanoseconds
+}
 
-func (a *activity) touch(t time.Time) { a.last.Store(t.UnixNano()) }
+func newActivity(now time.Time) *activity {
+	a := &activity{base: now}
+	a.touch(now)
+	return a
+}
+
+func (a *activity) touch(t time.Time) {
+	a.lastMono.Store(int64(t.Sub(a.base)))
+	a.lastWall.Store(t.UnixNano())
+}
+
 func (a *activity) since(t time.Time) time.Duration {
-	return t.Sub(time.Unix(0, a.last.Load()))
+	mono := t.Sub(a.base) - time.Duration(a.lastMono.Load())
+	wall := time.Duration(t.UnixNano() - a.lastWall.Load())
+	return max(mono, wall)
 }
 
 // errIdle reports a connection with no data and no ping for ReadTimeout.
@@ -474,7 +613,7 @@ func (c *Client) readLoop(ctx context.Context, wg *sync.WaitGroup, id uint64, co
 			send(connEvent{id: id, err: err})
 			return
 		}
-		if !send(connEvent{id: id, msg: &Message{Stream: stream, Event: ev, ConnID: id, Received: c.now()}}) {
+		if !send(connEvent{id: id, size: len(b), msg: &Message{Stream: stream, Event: ev, ConnID: id, Received: c.now()}}) {
 			return
 		}
 	}

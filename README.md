@@ -57,7 +57,30 @@ WebSocket piyasa verisini (kapanmış mumlar, en iyi fiyat, işlemler, yerel emi
 go run ./cmd/traderd observe -config configs/example.yaml -symbols BTCUSDT,ETHUSDT,SOLUSDT -duration 24h -out observe.jsonl
 ```
 
-Son satır `"type":"final"` özetidir; aynı özet ekrana da yazılır. Ctrl-C ile erken durdurulursa özet `"interrupted":true` ile yazılır.
+Son satır `"type":"final"` özetidir; aynı özet ekrana da yazılır. Ctrl-C ile erken durdurulursa özet `"interrupted":true` ile yazılır. `-out` verildiğinde her satır diske `fsync` ile yazılır (dosyanın klasörü de bir kez); süreç ya da makine düşerse o ana kadarki satırlar kalır. Standart çıktıya yazarken bu garanti yoktur.
+
+Kısa doğrulama (1 saat, bağlantı devri her 20 dakikada; 24 saat beklemeden devri sınar):
+
+```sh
+go run ./cmd/traderd observe -config configs/example.yaml -symbols BTCUSDT,ETHUSDT,SOLUSDT -duration 1h -rotate-after 20m -out observe-1h.jsonl
+```
+
+`-rotate-after` 1 dakika ile 23 sa 50 dk arasında olmalıdır; verilmezse 23 sa 50 dk'dır (Binance bağlantıyı 24 saatte kapatır). 24 saatlik koşu bunun yerine sunucunun kendi davranışını (gerçek 24 saat sınırı yaklaşırken devir, `serverShutdown`, günlük mum kapanışı) ve saatler içinde ortaya çıkan büyümeyi ölçer; üretimde VPS'te sürekli çalışan süreçle aynı koşuldur.
+
+Raporda uzun koşu için ek alanlar:
+
+| Alan | Anlamı | Beklenen |
+| --- | --- | --- |
+| `runtime.goroutines`, `runtime.heap_alloc_bytes` | Süreç büyümesi | Saatler boyunca sabit bir bant; sürekli artış sızıntıdır |
+| `ws.queue_high_water` | İşleyiciyi bekleyen en çok mesaj (kapasite 1024) | Küçük; 1024'e yaklaşması işleyicinin yetişemediğini gösterir |
+| `ws.max_delivery_lag_ms` | Okuma ile işleme arasındaki en uzun gecikme | Milisaniyeler |
+| `ws.rotations`, `ws.rotation_failures`, `ws.handovers` | Bağlantı devirleri. Devirde yeni bağlantının mesajları kısa bir süre (1 sn) bekletilir, eski bağlantı okunmaya devam eder; böylece eski bağlantıda yolda olan mesajlar kaybolmaz | Devir başına `book_gaps` ve `trade_id_gaps` artmamalı |
+| `ws.retired_dropped` | Devirden sonra eski bağlantıdan kuyrukta kalan, yenisinin zaten taşıdığı mesajlar | Küçük sayılar normaldir |
+| `clock.jumps` | Duvar saati sıçramaları: NTP düzeltmesi, elle değişiklik; Linux ve macOS'ta uyku (bu sistemlerde monoton saat uykuda durur). Windows'ta uyku burada görünmez | 0; Linux/macOS dizüstünde uyku olduysa > 0 |
+
+Veri tazeliği (R-9) ve bağlantının sessiz kalma süresi iki saatle ölçülür, büyük olan geçerlidir: monoton saat duvar saatinin geri atlamasından, duvar saati uykudan etkilenmez. Böylece uyanıştan sonra saatlerce eski veri taze görünmez; ileri doğru bir saat sıçraması en fazla gereksiz bir yeniden bağlantıya ya da bir sonraki olaya kadar "stale" işaretine yol açar.
+
+Dizüstünde koşarken uyku moduna geçmeyi engelleyin: macOS `caffeinate -i go run ...`, Linux `systemd-inhibit --what=idle:sleep go run ...`, Windows'ta Güç ayarlarından uyku "Hiçbir zaman". Uyku sırasında bağlantı düşer. Uyanınca bekçi bunu bir sonraki kontrolünde (en geç 15 sn) görür ve yeniden bağlanır; o ana kadar veri "stale" sayılır. Rapor bunu `ws.disconnects` (Linux/macOS'ta ayrıca `clock.jumps`) olarak gösterir.
 
 ## Başlangıç ön kontrolü ve depolama
 

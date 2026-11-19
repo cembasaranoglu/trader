@@ -3,7 +3,7 @@
 // Subcommands:
 //
 //	traderd [validate] -config <file>          validate the configuration (default)
-//	traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]
+//	traderd observe -config <file> -symbols A,B [-duration 24h] [-rotate-after 23h50m] [-out file]
 //	                                           stream market data and report its health
 //	traderd preflight -config <file> -credentials <file> -symbols A,B [-environment live|demo]
 //	                                           run the start-up safety checks
@@ -37,7 +37,7 @@ func main() {
 
 const usage = `usage:
   traderd [validate] -config <file>
-  traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]
+  traderd observe -config <file> -symbols A,B [-duration 24h] [-rotate-after 23h50m] [-out file]
   traderd preflight -config <file> -credentials <file> -symbols A,B [-environment live|demo]
   traderd store verify -config <file> | -file <db>
   traderd store backup -config <file>`

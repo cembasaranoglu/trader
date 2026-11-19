@@ -103,6 +103,7 @@ Bir dalga, kendi satırındaki "decision needed" maddeleri kapanmadan başlamaz.
 | U-20 | Python araç zinciri `uv` ve kilitli bağımlılıklar (numpy, pandas, scipy); yedek şifreleme için `age` | W3, W7 | Onay | **decision needed** |
 | U-21 | Plan v2'deki küçük biçim kararları: CSV (Parquet değil), OTel exporter yok (gen_ai.* adları log/metrikte) | W3, W5 | Onay | **decision needed** |
 | U-22 | W7 canlı kill tatbikatı için harcanabilecek tutar ve ücret | W7 | En küçük geçerli emir (5 USDT minNotional üstü), tatbikat başına ≤ 15 USDT | **decision needed** |
+| U-23 | Veritabanı: kullanıcı SQLite'ı reddetti (2026-11-19). PostgreSQL ve barındırma şekli (bulut sağlayıcının yönetilen PostgreSQL'i / VPS üzerinde kurulu PostgreSQL). Emir yolu (E-2) her niyette commit beklediği için veritabanı VPS ile aynı sağlayıcı ve bölgede olmalı (U-4 ile birlikte karar). Araştırma: proje dokümanı `research/F_database_options.md` | W1c yeniden (W2a'dan önce) | Sağlayıcıdan bağımsız standart PostgreSQL ≥ 16, `pgx/v5` v5.13.0; barındırma VPS ile aynı bölgede yönetilen PostgreSQL; altyapı maliyeti kapı hesabına eklenir | **decision needed** |
 
 ## 5. Dalga spesifikasyonları
 

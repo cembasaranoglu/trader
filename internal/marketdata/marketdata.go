@@ -565,11 +565,19 @@ func (m *Manager) Stale(symbol string) bool {
 	return m.staleLocked(st)
 }
 
+// staleLocked measures data age on both clocks and is stale if either is
+// over the limit. The monotonic age is immune to wall-clock steps; the wall
+// age catches a suspend (on Linux and macOS the monotonic clock stops while
+// suspended, so after a resume hours-old data would otherwise look fresh).
+// A forward wall-clock step only makes data look stale until the next event.
 func (m *Manager) staleLocked(st *symState) bool {
 	if st.book.State() != book.Live || st.stats.LastEvent.IsZero() {
 		return true
 	}
-	return m.now().Sub(st.stats.LastEvent) > m.cfg.MaxDataAge
+	now := m.now()
+	mono := now.Sub(st.stats.LastEvent)
+	wall := time.Duration(now.UnixNano() - st.stats.LastEvent.UnixNano())
+	return max(mono, wall) > m.cfg.MaxDataAge
 }
 
 // BookView is a read-only copy of the top of a book with its freshness,
