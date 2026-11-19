@@ -1,6 +1,7 @@
 # ADR-002: Depolama için SQLite (WAL)
 
-- Durum: Kabul edildi (2026-11-19); uygulama W1'de başlar
+- Durum: **Yerini aldı: ADR-007** (2026-11-19). Olay günlüğü, hash zinciri ve çapa ilkeleri ADR-007'de PostgreSQL üzerinde sürer.
+- Önceki durum: Kabul edildi (2026-11-19)
 - Kaynak: Plan dokümanı, "Repo yapısı ve konfigürasyon" bölümü
 
 ## Bağlam

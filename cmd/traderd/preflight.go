@@ -2,21 +2,16 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/url"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/cembasaranoglu/trader/internal/credentials"
 	"github.com/cembasaranoglu/trader/internal/exchange/binance"
 	"github.com/cembasaranoglu/trader/internal/exchange/httpx"
 	"github.com/cembasaranoglu/trader/internal/preflight"
-	"github.com/cembasaranoglu/trader/internal/store"
 )
 
 // demoURL is Binance Spot Demo Mode's REST host (binance-spot-api-docs, demo-mode/general-info.md).
@@ -78,8 +73,8 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	rctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	rep, err := preflight.Run(rctx, preflight.Params{Exchange: client, Environment: *env, Symbols: names,
-		STPMode: string(cfg.Execution.STPMode), MaxClockSkew: cfg.Ops.MaxClockSkew, StorePath: cfg.Store.Path,
-		VerifyChain: store.VerifyFile})
+		STPMode: string(cfg.Execution.STPMode), MaxClockSkew: cfg.Ops.MaxClockSkew,
+		VerifyStore: func(ctx context.Context) error { return verifyStore(ctx, cfg.Store) }})
 	for _, c := range rep.Checks {
 		status := "PASS"
 		switch {
@@ -108,65 +103,4 @@ func clipLine(s string) string {
 		return s[:400] + "…"
 	}
 	return s
-}
-
-func runStore(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || (args[0] != "verify" && args[0] != "backup") {
-		fmt.Fprintln(stderr, usage)
-		return 2
-	}
-	sub := args[0]
-	flags := flag.NewFlagSet("store "+sub, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	path := flags.String("config", "", "path to the YAML configuration file (required unless -file is given)")
-	file := flags.String("file", "", "verify: a database file such as a backup, instead of store.path; its .sha256 is checked when present")
-	if err := flags.Parse(args[1:]); err != nil {
-		return 2
-	}
-	if flags.NArg() != 0 || (*path == "" && *file == "") || (sub == "backup" && (*path == "" || *file != "")) {
-		fmt.Fprintln(stderr, usage)
-		return 2
-	}
-	target := *file
-	var cfgBackupDir string
-	if *path != "" {
-		cfg, ok := loadConfig(*path, stderr)
-		if !ok {
-			return 1
-		}
-		if target == "" {
-			target = cfg.Store.Path
-		}
-		cfgBackupDir = cfg.Store.BackupDir
-	}
-	if _, err := os.Stat(target); errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(stderr, "store: no database at %s\n", target)
-		return 1
-	}
-	switch sub {
-	case "verify":
-		// Check the checksum before anything opens the file.
-		if _, err := os.Stat(target + ".sha256"); err == nil {
-			if err := store.VerifyChecksum(target); err != nil {
-				fmt.Fprintln(stderr, "store verify:", err)
-				return 1
-			}
-		}
-		if err := store.VerifyFile(ctx, target); err != nil {
-			fmt.Fprintln(stderr, "store verify:", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "store ok: %s\n", target)
-		return 0
-	default:
-		// Read-only: safe while traderd is writing; never migrates the source.
-		dst := filepath.Join(cfgBackupDir, "trader-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
-		sum, err := store.BackupFile(ctx, target, dst)
-		if err != nil {
-			fmt.Fprintln(stderr, "store backup:", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "backup ok: %s sha256 %s\n", dst, sum)
-		return 0
-	}
 }

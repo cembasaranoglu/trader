@@ -7,7 +7,8 @@
 //     reading and spot trading, and trading only with an IP restriction;
 //   - self-trade prevention (R-22): the configured STP mode is allowed on
 //     every symbol, and every symbol exists;
-//   - event log integrity: the hash chain verifies against its anchor.
+//   - event log integrity: the store's schema, guards and hash chain verify
+//     against the anchor.
 //
 // Every check runs and is reported; the run fails when any check fails. The
 // permission check is skipped only for the Demo environment, where the /sapi
@@ -18,8 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -45,7 +44,6 @@ var (
 	ErrSTPNotAllowed      = errors.New("preflight: STP mode not allowed for a symbol")
 	ErrSymbolNotTrading   = errors.New("preflight: symbol not trading")
 	ErrEventLog           = errors.New("preflight: event log invalid")
-	ErrDatabaseMissing    = errors.New("preflight: database missing while its anchor exists")
 )
 
 // Environments.
@@ -61,8 +59,9 @@ type Exchange interface {
 	Symbols(ctx context.Context, names ...string) ([]exchange.Symbol, error)
 }
 
-// ChainVerifier verifies a database file and its anchor (store.VerifyFile).
-type ChainVerifier func(ctx context.Context, path string) error
+// StoreVerifier connects to the event store and verifies its schema, guards,
+// hash chain and anchor (store.OpenUnchecked + Store.Verify).
+type StoreVerifier func(ctx context.Context) error
 
 // Params configures Run.
 type Params struct {
@@ -71,8 +70,7 @@ type Params struct {
 	Symbols      []string
 	STPMode      string
 	MaxClockSkew time.Duration
-	StorePath    string
-	VerifyChain  ChainVerifier
+	VerifyStore  StoreVerifier
 	Now          func() time.Time
 }
 
@@ -95,7 +93,7 @@ type Report struct {
 // Run executes all checks. It returns an error wrapping ErrRefused when any
 // check failed, and an error for invalid parameters.
 func Run(ctx context.Context, p Params) (Report, error) {
-	if p.Exchange == nil || p.VerifyChain == nil || p.StorePath == "" || p.MaxClockSkew <= 0 || p.STPMode == "" {
+	if p.Exchange == nil || p.VerifyStore == nil || p.MaxClockSkew <= 0 || p.STPMode == "" {
 		return Report{}, errors.New("preflight: incomplete parameters")
 	}
 	if p.Environment != EnvLive && p.Environment != EnvDemo {
@@ -237,30 +235,12 @@ func checkSymbols(ctx context.Context, p Params) Check {
 
 func checkChain(ctx context.Context, p Params) Check {
 	c := Check{Name: "event_log"}
-	if _, err := os.Stat(p.StorePath); errors.Is(err, fs.ErrNotExist) {
-		// An anchor or WAL file without its database means the database was
-		// deleted or the configured path is wrong: do not start on an empty log.
-		for _, side := range []string{".anchor", "-wal"} {
-			if _, err := os.Stat(p.StorePath + side); err == nil {
-				c.Detail = fmt.Sprintf("%s exists but the database %s does not", p.StorePath+side, p.StorePath)
-				c.Err = ErrDatabaseMissing
-				return c
-			}
-		}
-		c.OK = true
-		c.Detail = "no database yet; it is created on first start"
-		return c
-	} else if err != nil {
+	if err := p.VerifyStore(ctx); err != nil {
 		c.Detail = err.Error()
-		c.Err = fmt.Errorf("%w: %v", ErrEventLog, err)
-		return c
-	}
-	if err := p.VerifyChain(ctx, p.StorePath); err != nil {
-		c.Detail = err.Error()
-		c.Err = fmt.Errorf("%w: %v", ErrEventLog, err)
+		c.Err = fmt.Errorf("%w: %w", ErrEventLog, err)
 		return c
 	}
 	c.OK = true
-	c.Detail = "hash chain verified against the anchor"
+	c.Detail = "schema, guards and hash chain verified against the anchor"
 	return c
 }

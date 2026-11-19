@@ -1,0 +1,45 @@
+# Production services on the VPS. Shipped inside the image (/deploy/compose.yaml)
+# and extracted by deploy.sh, so it always matches the deployed image.
+# The database is the managed PostgreSQL (Lightsail); nothing here holds data
+# except /var/lib/trader (anchor, exports, observe reports).
+name: trader
+
+x-traderd: &traderd
+  image: ${TRADER_IMAGE:?set by deploy.sh}
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "5"}
+  volumes:
+    - /opt/trader/secrets/app:/run/secrets:ro
+    - /var/lib/trader:/var/lib/trader
+
+services:
+  # The only service that sees the owner role's connection string.
+  migrate:
+    <<: *traderd
+    command: ["store", "migrate", "-config", "/etc/trader/config.yaml"]
+    volumes:
+      - /opt/trader/secrets/app:/run/secrets:ro
+      - /opt/trader/secrets/owner:/run/secrets-owner:ro
+      - /var/lib/trader:/var/lib/trader
+    restart: "no"
+    profiles: ["tools"]
+
+  verify:
+    <<: *traderd
+    command: ["store", "verify", "-config", "/etc/trader/config.yaml"]
+    restart: "no"
+    profiles: ["tools"]
+
+  # Market-data soak until the trading runtime exists (W2c): runs
+  # continuously, a new report file per 7-day run.
+  observe:
+    <<: *traderd
+    command: ["observe", "-config", "/etc/trader/config.yaml", "-symbols", "BTCUSDT,ETHUSDT,SOLUSDT",
+              "-duration", "168h", "-out-dir", "/var/lib/trader/observe"]
+    restart: unless-stopped
+    stop_grace_period: 30s

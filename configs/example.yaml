@@ -50,9 +50,12 @@ marketdata:
   kline_intervals: [1m, 1h, 4h, 1d]   # initial set; W3 research may change it
   reconnect_max_backoff_s: 60
 
-store:
-  path: data/trader.db          # anchor file is written next to it (trader.db.anchor)
-  backup_dir: data/backups
+store:                          # PostgreSQL 16+ (ADR-007); paths relative to this file
+  dsn_file: secrets/db-app.dsn    # application role connection string, chmod 600 (local Docker: env TRADER_STORE_DSN)
+  migrate_dsn_file: secrets/db-owner.dsn  # owner role, used only by 'traderd store migrate' (local Docker: env TRADER_STORE_MIGRATE_DSN)
+  app_role: trader_app
+  anchor_path: data/trader.anchor
+  export_dir: data/exports
 
 llm:
   cost_cap_pct_of_capital: 1    # D-13: live cap = this % of current capital per month
@@ -86,3 +89,4 @@ gates:
   paper_min_days: 60
   g2_min_days: 180
   edge_cost_multiple: 2         # D-13, tested on a lower confidence bound (D-14)
+  infra_monthly_usd: 0          # VPS + database per month, added to the gate's cost side (2026-11-19); set from the first invoice after provisioning

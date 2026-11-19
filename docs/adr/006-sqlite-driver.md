@@ -1,6 +1,7 @@
 # ADR-006: SQLite sürücüsü modernc.org/sqlite
 
-- Durum: Kabul edildi (2026-11-19, kullanıcı onayı U-3)
+- Durum: **Yerini aldı: ADR-007** (2026-11-19; kullanıcı SQLite'ı reddetti, PostgreSQL seçildi)
+- Önceki durum: Kabul edildi (2026-11-19, kullanıcı onayı U-3)
 - Kaynak: ADR-002; `research/E_binance_impl_facts.md` §J
 
 ## Bağlam

@@ -116,6 +116,7 @@ func runObserve(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	duration := fs.Duration("duration", 24*time.Hour, "how long to observe (1s..168h)")
 	rotateAfter := fs.Duration("rotate-after", 0, "replace the WebSocket connection after this long (1m..23h50m; default 23h50m)")
 	out := fs.String("out", "", "write JSON lines to this file instead of stdout")
+	outDir := fs.String("out-dir", "", "write JSON lines to a new observe-<UTC start>.jsonl in this directory (for services that restart)")
 	baseURL := fs.String("base-url", "", "override the REST signed host (testing)")
 	marketURL := fs.String("market-url", "", "override the REST market-data host (testing)")
 	wsURL := fs.String("ws-url", "", "override the WebSocket market-data host (testing)")
@@ -123,7 +124,7 @@ func runObserve(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 	names := splitSymbols(*symbols)
-	if *path == "" || fs.NArg() != 0 || len(names) == 0 || len(names) > maxObserveSymbols ||
+	if *path == "" || fs.NArg() != 0 || len(names) == 0 || len(names) > maxObserveSymbols || (*out != "" && *outDir != "") ||
 		*duration < time.Second || *duration > maxObserveDuration ||
 		(*rotateAfter != 0 && (*rotateAfter < minRotateAfter || *rotateAfter > ws.DefaultRotateAfter)) {
 		fmt.Fprintln(stderr, usage)
@@ -134,7 +135,15 @@ func runObserve(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	w, syncOut, closeOut, err := openOutput(*out, stdout)
+	target := *out
+	if *outDir != "" {
+		if err := os.MkdirAll(*outDir, 0o750); err != nil {
+			fmt.Fprintln(stderr, "observe:", err)
+			return 1
+		}
+		target = filepath.Join(*outDir, "observe-"+time.Now().UTC().Format("20060102T150405Z")+".jsonl")
+	}
+	w, syncOut, closeOut, err := openOutput(target, stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "observe:", err)
 		return 1

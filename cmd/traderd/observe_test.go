@@ -168,3 +168,31 @@ func TestClockJump(t *testing.T) {
 		t.Fatalf("no jump expected, got %v", j)
 	}
 }
+
+func TestObserveOutDir(t *testing.T) {
+	t.Parallel()
+	restURL, wsURL := fakeBinance(t)
+	dir := filepath.Join(t.TempDir(), "observe")
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"observe", "-config", "../../configs/example.yaml", "-symbols", "BTCUSDT",
+		"-duration", "1s", "-out-dir", dir, "-base-url", restURL, "-market-url", restURL, "-ws-url", wsURL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "observe-*.jsonl"))
+	if len(files) != 1 {
+		t.Fatalf("files %v", files)
+	}
+	if code := run(context.Background(), []string{"observe", "-config", "../../configs/example.yaml", "-symbols", "BTCUSDT",
+		"-out", "x", "-out-dir", dir}, &stdout, &stderr); code != 2 {
+		t.Fatalf("-out with -out-dir: exit %d", code)
+	}
+}
+
+func TestVersion(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"version"}, &stdout, &stderr); code != 0 || !strings.HasPrefix(stdout.String(), "traderd dev go") {
+		t.Fatalf("exit %d %q", code, stdout.String())
+	}
+}

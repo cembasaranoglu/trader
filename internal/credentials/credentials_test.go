@@ -84,3 +84,40 @@ func TestLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestReadSecret(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	write := func(name, body string, perm os.FileMode) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), perm); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, perm); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	v, _, err := ReadSecret(write("ok", "  postgres://u:secret@h/db  \n", 0o600))
+	if err != nil || v != "postgres://u:secret@h/db" {
+		t.Fatalf("%q %v", v, err)
+	}
+	for name, c := range map[string]struct {
+		body string
+		perm os.FileMode
+	}{
+		"empty":      {"\n", 0o600},
+		"two lines":  {"a\nb\n", 0o600},
+		"group read": {"secret-value\n", 0o640},
+		"world read": {"secret-value\n", 0o644},
+	} {
+		_, _, err := ReadSecret(write(name, c.body, c.perm))
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		} else if strings.Contains(err.Error(), "secret") && name != "empty" && name != "two lines" {
+			t.Errorf("%s: error leaks content: %v", name, err)
+		}
+	}
+}

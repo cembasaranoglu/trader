@@ -121,11 +121,16 @@ type MarketData struct {
 	ReconnectMaxBackoff time.Duration // upper bound of the stream reconnect delay
 }
 
-// Store locates the database and its backups (W1c). Relative paths are
-// relative to the process working directory.
+// Store configures the PostgreSQL event store (W1d, ADR-007). The
+// connection strings are read from files (chmod 600), never from this
+// config. Relative paths are resolved against the config file's directory
+// by LoadFile.
 type Store struct {
-	Path      string
-	BackupDir string
+	DSNFile        string // application role connection string
+	MigrateDSNFile string // owner role connection string, only for "store migrate"; may be empty
+	AppRole        string // the role "store migrate" grants privileges to
+	AnchorPath     string // local anchor file
+	ExportDir      string // "store export" output directory
 }
 
 // KlineIntervals are the intervals Binance spot supports (enums.md).
@@ -181,4 +186,8 @@ type Gates struct {
 	PaperMinDays     int
 	G2MinDays        int
 	EdgeCostMultiple float64
+	// InfraMonthlyUSD is the monthly infrastructure cost (VPS, database)
+	// counted with fees, slippage and LLM cost in the gate's cost side
+	// (decision 2026-11-19).
+	InfraMonthlyUSD float64
 }

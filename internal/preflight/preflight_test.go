@@ -3,8 +3,6 @@ package preflight
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -61,10 +59,12 @@ func goodEx() *fakeEx {
 	}
 }
 
+var errChainBroken = errors.New("hash chain broken")
+
 func params(ex *fakeEx, dir string) Params {
 	return Params{Exchange: ex, Environment: EnvLive, Symbols: []string{"BTCUSDT", "ETHUSDT"}, STPMode: "EXPIRE_TAKER",
-		MaxClockSkew: 500 * time.Millisecond, StorePath: filepath.Join(dir, "trader.db"),
-		VerifyChain: func(context.Context, string) error { return nil }, Now: ex.clock.Now}
+		MaxClockSkew: 500 * time.Millisecond,
+		VerifyStore:  func(context.Context) error { return nil }, Now: ex.clock.Now}
 }
 
 func failed(rep Report) []string {
@@ -83,8 +83,8 @@ func TestAllChecksPass(t *testing.T) {
 	if err != nil || !rep.OK || len(rep.Checks) != 4 {
 		t.Fatalf("%v %+v", err, rep)
 	}
-	if !strings.Contains(rep.Checks[3].Detail, "no database yet") {
-		t.Fatalf("missing database must be reported as not created: %+v", rep.Checks[3])
+	if rep.Checks[3].Name != "event_log" || !strings.Contains(rep.Checks[3].Detail, "hash chain verified") {
+		t.Fatalf("event log check: %+v", rep.Checks[3])
 	}
 }
 
@@ -111,12 +111,8 @@ func TestRefusals(t *testing.T) {
 		"symbol halted":             {func(e *fakeEx, _ *Params) { e.syms[1].SpotEnabled = false; e.syms[1].Status = "HALT" }, "symbols_stp", ErrSymbolNotTrading},
 		"exchangeInfo fails":        {func(e *fakeEx, _ *Params) { e.symErr = errors.New("418") }, "symbols_stp", ErrExchangeInfo},
 		"chain broken": {func(e *fakeEx, p *Params) {
-			os.WriteFile(p.StorePath, []byte("x"), 0o600)
-			p.VerifyChain = func(context.Context, string) error { return errors.New("hash chain broken") }
+			p.VerifyStore = func(context.Context) error { return errChainBroken }
 		}, "event_log", ErrEventLog},
-		"anchor without database": {func(e *fakeEx, p *Params) {
-			os.WriteFile(p.StorePath+".anchor", []byte("v1 5 x"), 0o600)
-		}, "event_log", ErrDatabaseMissing},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -175,7 +171,7 @@ func TestInvalidParams(t *testing.T) {
 		"bad env":       func(p *Params) { p.Environment = "staging" },
 		"no symbols":    func(p *Params) { p.Symbols = nil },
 		"no skew limit": func(p *Params) { p.MaxClockSkew = 0 },
-		"no verifier":   func(p *Params) { p.VerifyChain = nil },
+		"no verifier":   func(p *Params) { p.VerifyStore = nil },
 	} {
 		p := params(goodEx(), t.TempDir())
 		mut(&p)

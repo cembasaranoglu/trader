@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -103,8 +104,11 @@ func TestLoadFileExample(t *testing.T) {
 		{"depth_limit", cfg.MarketData.DepthLimit, 1000},
 		{"intervals", strings.Join(cfg.MarketData.KlineIntervals, ","), "1m,1h,4h,1d"},
 		{"reconnect_backoff", cfg.MarketData.ReconnectMaxBackoff, 60 * time.Second},
-		{"store_path", cfg.Store.Path, mustAbs(t, "../../configs/data/trader.db")},
-		{"backup_dir", cfg.Store.BackupDir, mustAbs(t, "../../configs/data/backups")},
+		{"dsn_file", cfg.Store.DSNFile, mustAbs(t, "../../configs/secrets/db-app.dsn")},
+		{"migrate_dsn_file", cfg.Store.MigrateDSNFile, mustAbs(t, "../../configs/secrets/db-owner.dsn")},
+		{"app_role", cfg.Store.AppRole, "trader_app"},
+		{"anchor_path", cfg.Store.AnchorPath, mustAbs(t, "../../configs/data/trader.anchor")},
+		{"export_dir", cfg.Store.ExportDir, mustAbs(t, "../../configs/data/exports")},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -183,10 +187,13 @@ func TestLoadRejects(t *testing.T) {
 		{"backoff 0", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.reconnect_max_backoff_s", 0) }, config.ErrInvalid, "marketdata.reconnect_max_backoff_s"},
 		{"backoff 301", func(t *testing.T, m map[string]any) { set(t, m, "marketdata.reconnect_max_backoff_s", 301) }, config.ErrInvalid, "marketdata.reconnect_max_backoff_s"},
 		{"missing store", func(t *testing.T, m map[string]any) { del(t, m, "store") }, config.ErrMissing, "store"},
-		{"blank store path", func(t *testing.T, m map[string]any) { set(t, m, "store.path", " ") }, config.ErrInvalid, "store.path"},
-		{"backup dir equals db dir", func(t *testing.T, m map[string]any) { set(t, m, "store.backup_dir", "data/") }, config.ErrInvalid, "store.backup_dir"},
-		{"backup dir equals db file", func(t *testing.T, m map[string]any) { set(t, m, "store.backup_dir", "data/trader.db") }, config.ErrInvalid, "store.backup_dir"},
-		{"backup dir contains db", func(t *testing.T, m map[string]any) { set(t, m, "store.backup_dir", ".") }, config.ErrInvalid, "store.backup_dir"},
+		{"blank dsn file", func(t *testing.T, m map[string]any) { set(t, m, "store.dsn_file", " ") }, config.ErrInvalid, "store.dsn_file"},
+		{"missing dsn file", func(t *testing.T, m map[string]any) { del(t, m, "store.dsn_file") }, config.ErrMissing, "store.dsn_file"},
+		{"same dsn files", func(t *testing.T, m map[string]any) { set(t, m, "store.migrate_dsn_file", "secrets/db-app.dsn") }, config.ErrInvalid, "store.migrate_dsn_file"},
+		{"bad app role", func(t *testing.T, m map[string]any) { set(t, m, "store.app_role", "Trader-App") }, config.ErrInvalid, "store.app_role"},
+		{"missing app role", func(t *testing.T, m map[string]any) { del(t, m, "store.app_role") }, config.ErrMissing, "store.app_role"},
+		{"export dir contains anchor", func(t *testing.T, m map[string]any) { set(t, m, "store.export_dir", "data") }, config.ErrInvalid, "store.export_dir"},
+		{"negative infra cost", func(t *testing.T, m map[string]any) { set(t, m, "gates.infra_monthly_usd", -1) }, config.ErrInvalid, "gates.infra_monthly_usd"},
 		{"gross plus reserve above 100", func(t *testing.T, m map[string]any) { set(t, m, "risk.cash_reserve_pct", 25) }, config.ErrInvalid, "risk.max_gross_exposure_pct"},
 	}
 	for _, tc := range tests {
@@ -346,7 +353,45 @@ func TestLoadFileResolvesRelativeStorePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Store.Path != filepath.Join(dir, "data", "trader.db") || cfg.Store.BackupDir != filepath.Join(dir, "data", "backups") {
+	if cfg.Store.DSNFile != filepath.Join(dir, "secrets", "db-app.dsn") || cfg.Store.AnchorPath != filepath.Join(dir, "data", "trader.anchor") ||
+		cfg.Store.ExportDir != filepath.Join(dir, "data", "exports") {
 		t.Fatalf("paths not resolved against the config directory: %+v", cfg.Store)
+	}
+}
+
+func TestMigrateDSNFileIsOptional(t *testing.T) {
+	t.Parallel()
+	m := exampleMap(t)
+	del(t, m, "store.migrate_dsn_file")
+	cfg, err := config.Load(bytes.NewReader(marshal(t, m)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Store.MigrateDSNFile != "" {
+		t.Fatalf("got %q", cfg.Store.MigrateDSNFile)
+	}
+}
+
+// TestDeployConfigsMatchExample keeps the Docker configs in step with the
+// example: they may differ only in store paths.
+func TestDeployConfigsMatchExample(t *testing.T) {
+	t.Parallel()
+	ex, err := config.LoadFile("../../configs/example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ex.Store = config.Store{}
+	for _, p := range []string{"../../deploy/local/config.yaml", "../../deploy/prod/config.yaml"} {
+		c, err := config.LoadFile(p)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if !filepath.IsAbs(c.Store.AnchorPath) || !strings.HasPrefix(c.Store.DSNFile, "/run/secrets/") {
+			t.Errorf("%s: store paths must be absolute container paths: %+v", p, c.Store)
+		}
+		c.Store = config.Store{}
+		if !reflect.DeepEqual(c, ex) {
+			t.Errorf("%s differs from configs/example.yaml outside the store section", p)
+		}
 	}
 }

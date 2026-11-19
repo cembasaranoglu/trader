@@ -37,8 +37,11 @@ C = {
  "marketdata.kline_intervals": {"type": "array", "minItems": 1, "uniqueItems": True,
      "items": {"enum": ["1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]}},
  "marketdata.reconnect_max_backoff_s": {"type": "integer", "minimum": 1, "maximum": 300},
- "store.path": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
- "store.backup_dir": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
+ "store.dsn_file": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
+ "store.migrate_dsn_file": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
+ "store.app_role": {"type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$"},
+ "store.anchor_path": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
+ "store.export_dir": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
  "llm.cost_cap_pct_of_capital": pct, "llm.rnd_monthly_cap_usd": usd,
  "llm.models.routine": {"type": "string", "pattern": "^\\S(.*\\S)?$"}, "llm.models.synthesis": {"type": "string", "pattern": "^\\S(.*\\S)?$"},
  "learning.min_supporting_trades": {"type": "integer", "minimum": 1, "maximum": 100000},
@@ -46,10 +49,13 @@ C = {
  "gates.paper_min_days": {"type": "integer", "minimum": 1, "maximum": 3650},
  "gates.g2_min_days": {"type": "integer", "minimum": 1, "maximum": 3650},
  "gates.edge_cost_multiple": {"type": "number", "minimum": 1, "maximum": 1000},
+ "gates.infra_monthly_usd": {"type": "number", "minimum": 0, "maximum": 1e9},
 }
+OPTIONAL = {"store.migrate_dsn_file"}  # optional in the Go loader as well
 def node(v, path):
     if isinstance(v, dict):
-        return {"type": "object", "additionalProperties": False, "required": list(v.keys()),
+        req = [k for k in v.keys() if (f"{path}.{k}" if path else k) not in OPTIONAL]
+        return {"type": "object", "additionalProperties": False, "required": req,
                 "properties": {k: node(x, f"{path}.{k}" if path else k) for k, x in v.items()}}
     if path in C: return dict(C[path])
     if path.endswith(".enabled"): return {"type": "boolean"}

@@ -1,0 +1,105 @@
+name: release
+
+# A version tag (vMAJOR.MINOR.PATCH) builds and pushes the image, then deploys
+# it to the VPS after approval in the "production" environment (required
+# reviewer; configure in Settings > Environments, see docs/runbook/deploy.md).
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPO: ghcr.io/cembasaranoglu/trader
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      TRADER_TEST_PG: postgres://postgres:ci-only@localhost:5432/postgres?sslmode=disable
+      TRADER_REQUIRE_PG: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build and push
+        id: push
+        env:
+          TAG: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker build --build-arg VERSION="$TAG" -t "$IMAGE_REPO:$TAG" .
+          docker push "$IMAGE_REPO:$TAG"
+          ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REPO:$TAG")"
+          echo "$ref" | grep -Eq "^$IMAGE_REPO@sha256:[0-9a-f]{64}\$"
+          echo "image=$ref" >> "$GITHUB_OUTPUT"
+          echo "pushed $ref"
+          docker logout ghcr.io
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      packages: read
+    steps:
+      - name: deploy to the VPS
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          umask 077
+          test -n "$VPS_HOST" && test -n "$VPS_SSH_KEY" && test -n "$VPS_KNOWN_HOSTS"
+          printf '%s\n' "$VPS_SSH_KEY" > "$RUNNER_TEMP/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+          # The host key is pinned (no trust on first use); the VPS runs only
+          # deploy.sh for this key (forced command).
+          printf '%s\n%s\n' "$ACTOR" "$TOKEN" | ssh -i "$RUNNER_TEMP/key" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -o ConnectTimeout=20 -o ServerAliveInterval=15 \
+            "deploy@$VPS_HOST" "deploy $IMAGE"
+      - name: remove key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/key" "$RUNNER_TEMP/known_hosts"

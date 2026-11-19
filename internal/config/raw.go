@@ -81,8 +81,11 @@ type rawMarketData struct {
 }
 
 type rawStore struct {
-	Path      *string `yaml:"path"`
-	BackupDir *string `yaml:"backup_dir"`
+	DSNFile        *string `yaml:"dsn_file"`
+	MigrateDSNFile *string `yaml:"migrate_dsn_file"`
+	AppRole        *string `yaml:"app_role"`
+	AnchorPath     *string `yaml:"anchor_path"`
+	ExportDir      *string `yaml:"export_dir"`
 }
 
 type rawLLM struct {
@@ -128,6 +131,7 @@ type rawGates struct {
 	PaperMinDays     *yamlInt `yaml:"paper_min_days"`
 	G2MinDays        *yamlInt `yaml:"g2_min_days"`
 	EdgeCostMultiple *float64 `yaml:"edge_cost_multiple"`
+	InfraMonthlyUSD  *float64 `yaml:"infra_monthly_usd"`
 }
 
 // yamlDuration accepts Go duration strings such as "60m" or "1h30m".

@@ -1,0 +1,7 @@
+.git
+.github
+**/secrets
+**/data
+*.jsonl
+*.dsn
+docs

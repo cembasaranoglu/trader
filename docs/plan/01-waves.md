@@ -47,25 +47,30 @@ Sonuç: imzalı uçlara, Demo Mode'a ve testnet'e dayanan her test GitHub Action
 | W1 | Tek dalga | W1a (tamam), W1b, W1c | Kapsam büyüklüğü |
 | W2 | Tek dalga | W2a, W2b, W2c | Kapsam büyüklüğü |
 | W9 BtcTurk | Plan içinde | Ertelendi; başlamadan önce yeni ADR gerekir | ADR-005: tek borsa |
+| Depolama | SQLite (ADR-002/006) | PostgreSQL 16, Lightsail Tokyo yönetilen; rol ayrımı, veritabanında zincir doğrulama, tek yürütücü + fencing (ADR-007, W1d) | Kullanıcı kararı 2026-11-19 (U-23, U-24) |
+| Çalıştırma ve deploy | systemd, elle kurulum | Docker imajı (distroless, uid 65532); yerelde Compose; `v*` etiketi + GitHub onayı ile VPS'e deploy (W1e) | Kullanıcı kararı 2026-11-19 (U-25) |
+| Kapı maliyeti | ücret + kayma + LLM | ücret + kayma + LLM + **altyapı** (`gates.infra_monthly_usd`) | Kullanıcı kararı 2026-11-19 |
 | Emir yolu | Genel ilkeler | Bağlayıcı E-1..E-13 kuralları (§5) | Bağımsız plan incelemesi: çift emir ve korumasız pozisyon senaryoları |
 | Canlı mod | Config kabul ediyordu | `live_small`/`live_full` W8'e kadar reddedilir | ADR-004 |
 
 ## 3. Sıra ve bağımlılıklar
 
 ```text
-W1b piyasa verisi WS ─┐
-W1c depolama + ön kontrol ─┼─> W2a deterministik çekirdek ─> W2b yürütme ─> W2c paper + kill switch ─┬─> W4 LLM (shadow) ─> W5 A3/A4 ─> W6 öğrenme ─> W7 soak + G1 ─> W8 küçük canlı + G2 ─> W10
-                           │                                                                          └─> W3 araştırma (W2a'dan sonra paralel; W5'ten önce bitmeli)
+W1b piyasa verisi WS ─────────────┐
+W1c ön kontrol ─> W1d PostgreSQL ─┼─> W2a deterministik çekirdek ─> W2b yürütme ─> W2c paper + kill switch ─┬─> W4 LLM (shadow) ─> W5 A3/A4 ─> W6 öğrenme ─> W7 soak + G1 ─> W8 küçük canlı + G2 ─> W10
+W1e Docker + deploy (W1d ile) ────┘                                                                          └─> W3 araştırma (W2a'dan sonra paralel; W5'ten önce bitmeli)
 ```
 
 | Dalga | Teslimat | Bağımlılık | Kapı |
 | --- | --- | --- | --- |
 | W1a | REST salt okuma, venuecheck, sertleştirme | — | **tamam** |
 | W1b | WS piyasa verisi, yerel emir defteri, tazelik izleme, 24 saat observe | W1a | — |
-| W1c | SQLite depolama, olay günlüğü (hash zinciri), yedek, başlangıç ön kontrolleri | W1a | — |
-| W2a | Evren seçici, özellikler, yer tutucu sinyal, boyutlandırma, risk motoru R-1..R-24 (saf fonksiyonlar) | W1b, W1c | — |
+| W1c | Başlangıç ön kontrolleri (SQLite depolama W1d ile değiştirildi) | W1a | **tamam** |
+| W1d | PostgreSQL olay deposu: rol ayrımı, veritabanında zincir doğrulama, tek yürütücü kirası + fencing, migrate/verify/export/anchor-init | W1c | **kodlandı** (canlı Lightsail doğrulaması bekliyor) |
+| W1e | Docker imajı, yerel Compose, CI'da imaj + Compose duman testi, `v*` + onay ile VPS deploy | W1d | **kodlandı** (VPS kurulumu bekliyor) |
+| W2a | Evren seçici, özellikler, yer tutucu sinyal, boyutlandırma, risk motoru R-1..R-24 (saf fonksiyonlar) | W1b, W1d | — |
 | W2b | Emir yolu, kullanıcı veri akışı, emir durum makinesi, borsada duran stoplar, mutabakat; Demo Mode doğrulaması | W2a | — |
-| W2c | Paper simülatörü, orkestratör, kill switch süreci, alarm, gözlem, systemd; 7 gün paper | W2b | — |
+| W2c | Paper simülatörü, orkestratör (tek yürütücü kirasıyla), kill switch süreci, alarm, gözlem; Compose servisi olarak; 7 gün paper | W2b | — |
 | W3 | Veri arşivi, Go replay/backtest, Python CPCV/DSR/PBO, baseline'lar, kural seçimi | W2a | — |
 | W4 | LLM katmanı, A1 + A2 shadow, maliyet valisi, politika paketi | W2c | — |
 | W5 | A3 + A4 paper karar yolunda, W3 kurallarının taşınması, rol katkı ölçümü | W4, W3 | — |
@@ -84,26 +89,31 @@ Bir dalga, kendi satırındaki "decision needed" maddeleri kapanmadan başlamaz.
 | U-1 | `venuecheck` / `observe` / `preflight` / `demo-check` komutlarını kendi makinende ya da VPS'te çalıştırıp çıktıyı paylaşmak | Her dalga | — | sürekli eylem |
 | U-2 | WebSocket bağımlılığı. Standart kütüphanede WS istemcisi yok | W1b | `github.com/coder/websocket` v1.8.15 (bağımlılıksız, `go 1.23`, context destekli; fact: proxy.golang.org) | **decision (2026-11-19): onaylandı** |
 | U-3 | SQLite sürücüsü | W1c | `modernc.org/sqlite` v1.62.0 (saf Go, cgo yok; `modernc.org/libc` v1.80.1 birebir sabitlenir; OFD kilitleri koddan açılır). Alternatif `mattn/go-sqlite3` v1.14.53 (cgo + gcc) | **decision (2026-11-19): onaylandı** (ADR-006) |
-| U-4 | VPS sağlayıcısı ve bölgesi. Binance'in kısıtladığı bir konum olmamalı (ABD IP'leri 451, ÖLÇÜM-2; tam ülke listesi API dokümanında yok) | W2c | Bölge seçilince `venuecheck` VPS'te çalıştırılır | **decision needed** |
+| U-4 | VPS sağlayıcısı ve bölgesi. Binance'in kısıtladığı bir konum olmamalı (ABD IP'leri 451, ÖLÇÜM-2; tam ülke listesi API dokümanında yok) | W1e | AWS Tokyo Lightsail | **decision (2026-11-19): AWS Tokyo Lightsail**; VPS'ten Binance erişim ölçümü (runbook/deploy.md §2.1) geçince kesinleşir |
 | U-5 | İlk kripto evren izin listesi (D-1, D-4). API varlık sınıfını ayırt etmiyor | W2b başı (W2a'nın `traderd universe` çıktısıyla) | Aday listeyi W2a üretir | **decision needed** |
 | U-6 | İki ayrı Demo Mode API anahtarı (demo.binance.com): biri traderd, biri kill switch için. Demo'nun hangi anahtar tiplerini desteklediği unknown; Ed25519 denenir, olmazsa HMAC | W2b | — | eylem |
-| U-7 | Alarm kanalı: Telegram botu (token + chat id). Telegram'dan elle kill komutu verebilecek tek chat id | W2c | Komutlar yalnız tanımlı chat id'den, `cancel_entries` / `close_all`, onay ikinci mesajla | **decision needed** |
-| U-8 | Haber kaynakları beyaz listesi ve `golang.org/x/text` v0.44.0 bağımlılığı (Unicode normalizasyonu). Resmi kaynak: Binance Announcements WebSocket (yalnız HMAC imzası belgelenmiş) | W2c (yalnız Binance duyuruları, R-16 için), W4 (diğer kaynaklar) | Announcements için ayrı, yalnız-okuma HMAC anahtarı | **decision needed** |
-| U-9 | Anthropic API anahtarı, workspace harcama limiti, `github.com/anthropics/anthropic-sdk-go/v2` v2.11.0 bağımlılığı | W4 | Resmi SDK (fact: Go 1.25+, v2.11.0 2026-11-17) | **decision needed** + eylem |
-| U-10 | VPS dışı heartbeat izleyicisi: yalnız alarm mı, iptal yetkili ayrı anahtar mı | W7 | Yalnız alarm (ek anahtar yüzeyi açmamak için) | **decision needed** |
+| U-7 | Alarm kanalı: Telegram botu (token + chat id). Telegram'dan elle kill komutu verebilecek tek chat id | W2c | Komutlar yalnız tanımlı chat id'den, `cancel_entries` / `close_all`, onay ikinci mesajla | **decision (2026-11-19): öneri onaylandı** |
+| U-8 | Haber kaynakları beyaz listesi ve `golang.org/x/text` v0.44.0 bağımlılığı (Unicode normalizasyonu). Resmi kaynak: Binance Announcements WebSocket (yalnız HMAC imzası belgelenmiş) | W2c (yalnız Binance duyuruları, R-16 için), W4 (diğer kaynaklar) | Announcements için ayrı, yalnız-okuma HMAC anahtarı | **decision (2026-11-19): öneri onaylandı** |
+| U-9 | Anthropic API anahtarı, workspace harcama limiti, `github.com/anthropics/anthropic-sdk-go/v2` v2.11.0 bağımlılığı | W4 | Resmi SDK (fact: Go 1.25+, v2.11.0 2026-11-17) | **decision (2026-11-19): öneri onaylandı** + eylem |
+| U-10 | VPS dışı heartbeat izleyicisi: yalnız alarm mı, iptal yetkili ayrı anahtar mı | W7 | Yalnız alarm (ek anahtar yüzeyi açmamak için) | **decision (2026-11-19): öneri onaylandı** |
 | U-11 | Canlı anahtarlar: traderd (Spot trading + Reading, IP kısıtlı, çekim kapalı), kill switch (aynı yetkiler, ayrı anahtar) | W7 | Ed25519 | eylem |
-| U-12 | G2 eşikleri. Süre kararlı (D-16: 180 gün); güven düzeyi, bootstrap yöntemi ve blok uzunluğu, baseline seti kayıtlı değil | W8 başı | G1 ile aynı yöntem (U-17) | **decision needed** |
+| U-12 | G2 eşikleri. Süre kararlı (D-16: 180 gün); güven düzeyi, bootstrap yöntemi ve blok uzunluğu, baseline seti kayıtlı değil | W8 başı | G1 ile aynı yöntem (U-17) | **decision (2026-11-19): öneri onaylandı** |
 | U-13 | Sık işlemin vergi niteliği (GVK Md. 37), SMMM/YMM görüşü | W8 öncesi | — | dış danışmanlık |
-| U-14 | Komisyon varlığı: BNB ile ödeme (indirimli, R-19'da ayrı kural) mı, alınan varlıktan kesilmesi mi | W2b | BNB **kullanılmaz**: ücret alınan varlıktan düşer, koruma miktarı net miktardan hesaplanır; BNB fiyat riski ve ayrı mutabakat kuralı gerekmez | **decision needed** |
-| U-15 | Backtest motorunun ve A5 çağrısının Go'ya taşınması (ADR-001 katman 4 ve D-8 "Python araştırma" tanımını değiştirir); Python yalnız istatistik | W3 | Onay (gösterge kodunun tek kaynağı olması için) | **decision needed** |
-| U-16 | Koruyucu stop tipi: `STOP_LOSS` (tetiklenince MARKET; fact: GH/rest-api.md) ya da `STOP_LOSS_LIMIT` (boşlukta dolmayabilir) | W2b | `STOP_LOSS` | **decision needed** |
-| U-17 | G1 eşikleri (önceden kayıt): bootstrap güven düzeyi, yöntem ve blok uzunluğu, maliyet doğruluğu toleransı, baseline seti (BTC/USDT al-tut, momentum, eşit ağırlıklı sepet) | W2c sonu (paper verisi toplanmaya başlamadan kaydedilir) | %95 tek yönlü, sabit 7 günlük blok bootstrap | **decision needed** |
+| U-14 | Komisyon varlığı: BNB ile ödeme (indirimli, R-19'da ayrı kural) mı, alınan varlıktan kesilmesi mi | W2b | BNB **kullanılmaz**: ücret alınan varlıktan düşer, koruma miktarı net miktardan hesaplanır; BNB fiyat riski ve ayrı mutabakat kuralı gerekmez | **decision (2026-11-19): öneri onaylandı** |
+| U-15 | Backtest motorunun ve A5 çağrısının Go'ya taşınması (ADR-001 katman 4 ve D-8 "Python araştırma" tanımını değiştirir); Python yalnız istatistik | W3 | Onay (gösterge kodunun tek kaynağı olması için) | **decision (2026-11-19): öneri onaylandı** |
+| U-16 | Koruyucu stop tipi: `STOP_LOSS` (tetiklenince MARKET; fact: GH/rest-api.md) ya da `STOP_LOSS_LIMIT` (boşlukta dolmayabilir) | W2b | `STOP_LOSS` | **decision (2026-11-19): öneri onaylandı** |
+| U-17 | G1 eşikleri (önceden kayıt): bootstrap güven düzeyi, yöntem ve blok uzunluğu, maliyet doğruluğu toleransı, baseline seti (BTC/USDT al-tut, momentum, eşit ağırlıklı sepet) | W2c sonu (paper verisi toplanmaya başlamadan kaydedilir) | %95 tek yönlü, sabit 7 günlük blok bootstrap | **decision (2026-11-19): öneri onaylandı** |
 | U-18 | USD/TRY kur kaynağı (vergi defteri) ve USDT/USD depeg referansı (R-21) | W2c | Birer resmi/kamu kaynak; seçim kullanıcıda | **decision needed** |
-| U-19 | Onay imzası: kullanıcı onayları (kill sonrası yeniden başlatma, politika terfisi, kapı) hangi anahtarla | W2c | OpenSSH `ssh-keygen -Y sign` ile kullanıcının SSH anahtarı; doğrulama `allowed_signers` dosyasıyla | **decision needed** |
-| U-20 | Python araç zinciri `uv` ve kilitli bağımlılıklar (numpy, pandas, scipy); yedek şifreleme için `age` | W3, W7 | Onay | **decision needed** |
-| U-21 | Plan v2'deki küçük biçim kararları: CSV (Parquet değil), OTel exporter yok (gen_ai.* adları log/metrikte) | W3, W5 | Onay | **decision needed** |
-| U-22 | W7 canlı kill tatbikatı için harcanabilecek tutar ve ücret | W7 | En küçük geçerli emir (5 USDT minNotional üstü), tatbikat başına ≤ 15 USDT | **decision needed** |
-| U-23 | Veritabanı: kullanıcı SQLite'ı reddetti (2026-11-19). PostgreSQL ve barındırma şekli (bulut sağlayıcının yönetilen PostgreSQL'i / VPS üzerinde kurulu PostgreSQL). Emir yolu (E-2) her niyette commit beklediği için veritabanı VPS ile aynı sağlayıcı ve bölgede olmalı (U-4 ile birlikte karar). Araştırma: proje dokümanı `research/F_database_options.md` | W1c yeniden (W2a'dan önce) | Sağlayıcıdan bağımsız standart PostgreSQL ≥ 16, `pgx/v5` v5.13.0; barındırma VPS ile aynı bölgede yönetilen PostgreSQL; altyapı maliyeti kapı hesabına eklenir | **decision needed** |
+| U-19 | Onay imzası: kullanıcı onayları (kill sonrası yeniden başlatma, politika terfisi, kapı) hangi anahtarla | W2c | OpenSSH `ssh-keygen -Y sign` ile kullanıcının SSH anahtarı; doğrulama `allowed_signers` dosyasıyla | **decision (2026-11-19): öneri onaylandı** |
+| U-20 | Python araç zinciri `uv` ve kilitli bağımlılıklar (numpy, pandas, scipy); yedek şifreleme için `age` | W3, W7 | Onay | **decision (2026-11-19): öneri onaylandı** |
+| U-21 | Plan v2'deki küçük biçim kararları: CSV (Parquet değil), OTel exporter yok (gen_ai.* adları log/metrikte) | W3, W5 | Onay | **decision (2026-11-19): öneri onaylandı** |
+| U-22 | W7 canlı kill tatbikatı için harcanabilecek tutar ve ücret | W7 | En küçük geçerli emir (5 USDT minNotional üstü), tatbikat başına ≤ 15 USDT | **decision (2026-11-19): öneri onaylandı** |
+| U-23 | Veritabanı (**decision 2026-11-19: PostgreSQL 16, Lightsail Tokyo yönetilen**, ADR-007): kullanıcı SQLite'ı reddetti (2026-11-19). PostgreSQL ve barındırma şekli (bulut sağlayıcının yönetilen PostgreSQL'i / VPS üzerinde kurulu PostgreSQL). Emir yolu (E-2) her niyette commit beklediği için veritabanı VPS ile aynı sağlayıcı ve bölgede olmalı (U-4 ile birlikte karar). Araştırma: proje dokümanı `research/F_database_options.md` | W1c yeniden (W2a'dan önce) | Sağlayıcıdan bağımsız standart PostgreSQL ≥ 16, `pgx/v5` v5.13.0; barındırma VPS ile aynı bölgede yönetilen PostgreSQL; altyapı maliyeti kapı hesabına eklenir | **decision (2026-11-19): onaylandı** |
+
+| U-24 | Ölçekleme modeli | W1d, W2b, W2c | Tek yürütücü (veritabanı kirası + fencing epoch) + yatay ölçeklenen işçiler | **decision (2026-11-19): onaylandı** (ADR-007 §7) |
+| U-25 | Deploy tetikleyicisi | W1e | `v*` etiketi → imaj (ghcr.io) → `production` environment onayı → SSH (zorlanmış komut `deploy.sh`) | **decision (2026-11-19): onaylandı** |
+| U-26 | Repo görünürlüğü: `cembasaranoglu/trader` şu an **public** (fact, GitHub API). Strateji, risk parametreleri ve ileride politika/prompt paketleri herkese açık olur. Private yapılırsa GitHub Free'de environment onayı (required reviewers) kullanılamaz (fact, GitHub dokümanı); onay için Pro/Team yetmez, Enterprise gerekir | W1e (deploy), W4 (politika paketi) | — | **decision needed** |
+| U-27 | Altyapı maliyetinin kapıya eklenmesi | W2c (kapı hesabı), W7, W8 | `gates.infra_monthly_usd`; ilk faturadan sonra gerçek değer | **decision (2026-11-19): onaylandı** |
 
 ## 5. Dalga spesifikasyonları
 
@@ -179,6 +189,8 @@ Bu kurallar doğrulayıcı incelemesindeki yüksek önemli bulgulardan çıktı.
 
 ### W1c — Depolama, olay günlüğü, yedek, ön kontroller
 
+> Not (2026-11-19): bu dalganın SQLite depolama kısmı W1d ile PostgreSQL'e taşındı (ADR-007). Ön kontroller geçerli; aşağıdaki depolama satırları tarihsel kayıttır.
+
 | # | Alan | İçerik |
 | --- | --- | --- |
 | 1 | Amaç | Kararların, emirlerin, dolumların, onayların çökme güvenli ve değiştirilemez kaydı (I-6); başlamadan önce güvenlik koşullarının borsadan doğrulanması (I-7, R-20, R-22) |
@@ -202,6 +214,49 @@ Bu kurallar doğrulayıcı incelemesindeki yüksek önemli bulgulardan çıktı.
 | 19 | Riskler | libc sürüm uyumsuzluğu → CI kontrolü; OFD kilidi uyarısı → systemd'de `MODERNC_SQLITE_OFD_LOCK=1` (W2c); disk dolması → yazma hatası güvenli moda geçirir (W2c) |
 | 20 | Geri alma | İleri-yalnız migration; veri yedekten |
 | 21 | Çıkış kriteri | Testler + inceleme temiz; kullanıcının preflight çıktısı |
+| 22 | Sonraki adım | W2a |
+
+### W1d — PostgreSQL olay deposu (ADR-007)
+
+| # | Alan | İçerik |
+| --- | --- | --- |
+| 1 | Amaç | SQLite'ı yönetilen PostgreSQL 16 ile değiştirmek; çok süreçli yazmada yarış koşulsuz zincir ve tek yürütücü garantisi |
+| 2 | Kaynak | U-23, U-24 (decision), proje dokümanı `research/F_database_options.md`, Lightsail ve PostgreSQL dokümanları |
+| 3 | Kapsam | (a) `internal/store` (pgx v5.13.0): `Open` (sürüm ≥ 16, rol yetkisi, şema, tam zincir + çapa), `Update`/`Append` (işlem düzeyinde advisory lock, uçu veritabanından okur), `Events`, `Tip`, `Verify` (REPEATABLE READ, sayfalı, sabit bellek), `Export`/`VerifyExport` (JSONL, payload base64), `InitAnchor`, `OpenUnchecked`. (b) Migration 0001: `events` + ekleme tetikleyicisi (seq/prev_hash/hash veritabanında), kayıt tablolarında UPDATE/DELETE/TRUNCATE reddi, `leases` + `trader_acquire_lease`/`trader_release_lease` (SECURITY DEFINER, oturum advisory lock, epoch artışı), `trader_fence` (`intents`/`orders`, `FOR SHARE`). (c) `Migrate`: sahip rol, migration kilidi, sağlama toplamı, uygulama rolüne yetki. (d) `Lease`: ayrı bağlantı, sunucu tarafı TCP keepalive, ping ile kayıp tespiti, `Lost()`. (e) Bağlantı dizesi: dosyadan (`credentials.ReadSecret`), yerel olmayan hostta `verify-full` zorunlu; ortam değişkeni yalnız yerel. (f) `traderd store migrate/verify/export/anchor-init`, `verify -export`; preflight `event_log` kontrolü depoyu doğrular. (g) `internal/pgtest`: test başına veritabanı + sahip/uygulama rolleri |
+| 4 | Kapsam dışı | Emir verisi yazımı (W2b), VPS dışı şifreli kopya (W7) |
+| 5 | Ön koşul | U-23, U-24 |
+| 6 | Varsayımlar | Lightsail ana kullanıcısı `CREATE ROLE` çalıştırabilir (kurulumda doğrulanır) |
+| 7 | Blocker | Yok (kod); canlı doğrulama Lightsail kurulumunu bekler |
+| 8–11 | Dosyalar | Eklenen: `internal/store/{store,dsn,migrate,verify,lease,export,anchor}.go`, `internal/pgtest`, `cmd/traderd/store.go`, ADR-007. Değişen: `internal/config` (store alanları, `gates.infra_monthly_usd`), `internal/preflight`, `internal/credentials`. Silinen: SQLite sürücüsü ve kilit dosyası kodu |
+| 12 | Çalışma yüzeyi | `traderd store migrate -config`, `verify -config | -export`, `export -config`, `anchor-init -config`; `traderd preflight` |
+| 13 | Sözleşmeler | Hash fonksiyonu Go ve SQL'de aynı; hata kodları TR001 fenced, TR002 append-only, TR003 zincir; dışa aktarma biçimi `trader-events` v1 |
+| 14 | Config/doküman | `store.{dsn_file, migrate_dsn_file, app_role, anchor_path, export_dir}`, `gates.infra_monthly_usd`; `docs/runbook/storage.md` |
+| 15 | Testler | Gerçek PostgreSQL 16: migrate idempotent + sağlama toplamı; yanlış rol/süper kullanıcı/fazla yetki reddi; payload sözleşmesi; uygulama rolü ve süper kullanıcıyla kurcalama reddi; 8 eşzamanlı yazıcı × 2 süreç (çatallanma yok); tetikleyici devre dışı/kaldırılmış/fonksiyon değişmiş/satır değişmiş tespiti; çapa (eski anlık görüntü, yeniden yazım, eksik, init, başka sürecin eklemesi); kira + fencing (oturum öldürülünce kayıp, yeni epoch, eski epoch'la yazma reddi); fence ile epoch artışının sıralanması; dışa aktarma gidiş-dönüş + kurcalama + bitiş satırı; DSN kuralları (çok host, açık CA) ve parolanın hatalarda görünmemesi; bağımsız incelemede bulunan üç `search_path` saldırısı (etkisiz olmalı); fonksiyon öznitelik değişiklikleri (SECURITY DEFINER, `search_path`, fazladan/aşırı yüklenmiş fonksiyon); ayrıcalık retleri (TEMPORARY, sahibin üyesi, fazladan INSERT/DELETE); veritabanında payload sözleşmesi; kira oturum ayarları ve eşzamanlı Release; `deploy.sh` (sahte docker ile: başarı sırası, her adımda hata, kötü girdi) |
+| 16 | Doğrulama | gofmt, vet, staticcheck, `go test -race ./...` (PostgreSQL ile; CI'da `TRADER_REQUIRE_PG=1`) |
+| 17 | Build | `CGO_ENABLED=0` |
+| 18 | Canlı doğrulama | Lightsail'de `store migrate` + `verify`; kira kaybı tatbikatı W2c'de |
+| 19 | Riskler | Veritabanı emir yolunda zorunlu bağımlılık → fail-closed; sahip kimlik bilgisi tehdit modeli dışında → W7 VPS dışı kopyalar |
+| 20 | Geri alma | Yok (SQLite verisi yoktu; ilk kurulum) |
+| 21 | Çıkış kriteri | Testler ve CI yeşil; bağımsız inceleme bulguları kapalı |
+| 22 | Sonraki adım | W1e, sonra W2a |
+
+### W1e — Docker imajı, yerel Compose, GitHub'dan VPS deploy
+
+| # | Alan | İçerik |
+| --- | --- | --- |
+| 1 | Amaç | Yerelde Docker ile çalışmak; `v*` etiketi ve onayla VPS'e tekrarlanabilir deploy |
+| 2 | Kaynak | U-4, U-25 (decision); GitHub ve Lightsail dokümanları |
+| 3 | Kapsam | (a) `Dockerfile`: statik ikili, distroless `nonroot` (65532), salt okuma kök dosya sistemi uyumlu; imajda üretim config'i ve `compose.yaml`. (b) `compose.yaml` (yerel): `postgres:16-alpine`, `migrate`, `verify`, `observe` profili. (c) `deploy/prod/compose.yaml`: `migrate`/`verify` (araç profili), `observe` sürekli servis; `cap_drop: ALL`, `no-new-privileges`, log döndürme. (d) `deploy/prod/deploy.sh`: zorlanmış SSH komutu; yalnız digest'li imaj; kısa ömürlü token geçici Docker config'te; imajdan compose çıkarma; migrate → verify → up; deployments.log. (e) CI: PostgreSQL servisiyle testler, `container` işi (imaj, Compose yığını, non-root, üretim compose doğrulaması, taban imaj digest'leri), shellcheck. (f) `release.yml`: test → imaj (ghcr.io, digest) → `production` onayı → SSH deploy. (g) `traderd version`, `observe -out-dir` |
+| 4 | Kapsam dışı | Trading runtime servisi (W2c), VPS dışı yedek (W7), çok host (işçiler W3/W4 ile) |
+| 5 | Ön koşul | W1d |
+| 6 | Varsayımlar | Taban imaj digest'leri ilk CI çalışmasından alınıp sabitlenir |
+| 7 | Blocker | VPS ve Lightsail kurulumu (kullanıcı, runbook/deploy.md §2); U-26 |
+| 12 | Çalışma yüzeyi | `docker compose run --rm migrate|verify`, `docker compose --profile observe up -d`, `git tag vX.Y.Z && git push origin vX.Y.Z` |
+| 15 | Testler | Config dosyalarının örnekle eşliği; `observe -out-dir`; `version`; CI'da Compose duman testi |
+| 18 | Canlı doğrulama | İlk etiketle VPS'e deploy; `observe` raporları `/var/lib/trader/observe` |
+| 19 | Riskler | Deploy anahtarının sızması → zorlanmış komut, sabit host anahtarı, environment onayı; docker grubu root'a eşdeğer → anahtar yalnız deploy.sh |
+| 20 | Geri alma | Önceki yayın çalıştırmasının `deploy` işini yeniden çalıştırmak (aynı digest) |
+| 21 | Çıkış kriteri | CI `container` işi yeşil; ilk yayın VPS'te çalışıyor |
 | 22 | Sonraki adım | W2a |
 
 ### W2a — Deterministik çekirdek (saf fonksiyonlar)

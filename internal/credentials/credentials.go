@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cembasaranoglu/trader/internal/exchange/binance"
 )
@@ -86,6 +87,23 @@ func Load(path string) (*Credentials, error) {
 	default:
 		return nil, errors.New("credentials: credentials file needs secret_key or ed25519_private_key_file")
 	}
+}
+
+// ReadSecret reads a one-line secret (such as a database connection
+// string) from a private file with the same checks as Load: a regular,
+// non-symlink file, owner-only permissions and, on Unix, owned by the
+// current user. Surrounding whitespace is trimmed; the value must be a
+// single non-empty line. Errors never include the content.
+func ReadSecret(path string) (string, []string, error) {
+	data, warn, err := readPrivateFile(path)
+	if err != nil {
+		return "", nil, err
+	}
+	v := strings.TrimSpace(string(data))
+	if v == "" || strings.ContainsAny(v, "\r\n") {
+		return "", nil, errors.New("credentials: secret file must hold exactly one non-empty line")
+	}
+	return v, warn, nil
 }
 
 // readPrivateFile reads a small regular, non-symlink file and applies the

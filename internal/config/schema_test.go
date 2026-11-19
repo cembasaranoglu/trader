@@ -34,6 +34,15 @@ func schemaLeaves(t *testing.T, n schemaNode, prefix string, out *[]string) {
 		keys = append(keys, k)
 	}
 	req := slices.Clone(n.Required)
+	for _, k := range keys {
+		full := k
+		if prefix != "" {
+			full = prefix + "." + k
+		}
+		if optionalKeys[full] {
+			req = append(req, k) // optional in the loader and the schema
+		}
+	}
 	sort.Strings(keys)
 	sort.Strings(req)
 	if !slices.Equal(keys, req) {
@@ -61,6 +70,9 @@ func mapLeaves(m map[string]any, prefix string, out *[]string) {
 		*out = append(*out, p)
 	}
 }
+
+// optionalKeys mirrors OPTIONAL in scripts/gen_schema.py.
+var optionalKeys = map[string]bool{"store.migrate_dsn_file": true}
 
 // TestSchemaMatchesExample keeps configs/schema.json, configs/example.yaml and
 // the loader (via TestLoadFileExample) describing the same set of keys.

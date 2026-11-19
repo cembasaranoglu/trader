@@ -305,15 +305,29 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "path",
-        "backup_dir"
+        "dsn_file",
+        "app_role",
+        "anchor_path",
+        "export_dir"
       ],
       "properties": {
-        "path": {
+        "dsn_file": {
           "type": "string",
           "pattern": "^\\S(.*\\S)?$"
         },
-        "backup_dir": {
+        "migrate_dsn_file": {
+          "type": "string",
+          "pattern": "^\\S(.*\\S)?$"
+        },
+        "app_role": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+        },
+        "anchor_path": {
+          "type": "string",
+          "pattern": "^\\S(.*\\S)?$"
+        },
+        "export_dir": {
           "type": "string",
           "pattern": "^\\S(.*\\S)?$"
         }
@@ -487,7 +501,8 @@
       "required": [
         "paper_min_days",
         "g2_min_days",
-        "edge_cost_multiple"
+        "edge_cost_multiple",
+        "infra_monthly_usd"
       ],
       "properties": {
         "paper_min_days": {
@@ -504,6 +519,11 @@
           "type": "number",
           "minimum": 1,
           "maximum": 1000
+        },
+        "infra_monthly_usd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000000.0
         }
       }
     }

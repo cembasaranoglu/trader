@@ -68,8 +68,8 @@ func LoadFile(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: resolve directory: %w", err)
 	}
-	for _, p := range []*string{&cfg.Store.Path, &cfg.Store.BackupDir} {
-		if !filepath.IsAbs(*p) {
+	for _, p := range []*string{&cfg.Store.DSNFile, &cfg.Store.MigrateDSNFile, &cfg.Store.AnchorPath, &cfg.Store.ExportDir} {
+		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(dir, *p)
 		}
 	}
@@ -255,6 +255,9 @@ const (
 	maxWindow     = 24 * time.Hour
 )
 
+// appRolePattern is a PostgreSQL role name the store accepts.
+var appRolePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+
 // minMaxDrawdownPct is the lower bound the user set for the total drawdown limit (D-11).
 const minMaxDrawdownPct = 30
 
@@ -317,15 +320,27 @@ func (c *checker) build(r *rawConfig) *Config {
 		}
 	}
 	if present(c, "store", r.Store) {
+		st := r.Store
 		cfg.Store = Store{
-			Path:      c.filePath("store.path", r.Store.Path),
-			BackupDir: c.filePath("store.backup_dir", r.Store.BackupDir),
+			DSNFile:    c.filePath("store.dsn_file", st.DSNFile),
+			AppRole:    c.nonBlank("store.app_role", st.AppRole),
+			AnchorPath: c.filePath("store.anchor_path", st.AnchorPath),
+			ExportDir:  c.filePath("store.export_dir", st.ExportDir),
 		}
-		if cfg.Store.Path != "" && cfg.Store.BackupDir != "" {
-			db, _ := filepath.Abs(cfg.Store.Path)
-			bk, _ := filepath.Abs(cfg.Store.BackupDir)
-			if bk == filepath.Dir(db) || bk == db || strings.HasPrefix(db, bk+string(filepath.Separator)) {
-				c.invalid("store.backup_dir", "must not contain or equal the database or its directory")
+		if st.MigrateDSNFile != nil {
+			cfg.Store.MigrateDSNFile = c.filePath("store.migrate_dsn_file", st.MigrateDSNFile)
+		}
+		if cfg.Store.AppRole != "" && !appRolePattern.MatchString(cfg.Store.AppRole) {
+			c.invalid("store.app_role", "must match %s", appRolePattern)
+		}
+		if cfg.Store.DSNFile != "" && cfg.Store.DSNFile == cfg.Store.MigrateDSNFile {
+			c.invalid("store.migrate_dsn_file", "must differ from store.dsn_file (owner and application roles are separate)")
+		}
+		if cfg.Store.AnchorPath != "" && cfg.Store.ExportDir != "" {
+			an, _ := filepath.Abs(cfg.Store.AnchorPath)
+			ex, _ := filepath.Abs(cfg.Store.ExportDir)
+			if an == ex || strings.HasPrefix(an, ex+string(filepath.Separator)) {
+				c.invalid("store.export_dir", "must not contain the anchor file")
 			}
 		}
 	}
@@ -355,6 +370,7 @@ func (c *checker) build(r *rawConfig) *Config {
 			PaperMinDays:     c.intIn("gates.paper_min_days", r.Gates.PaperMinDays, 1, maxDays),
 			G2MinDays:        c.intIn("gates.g2_min_days", r.Gates.G2MinDays, 1, maxDays),
 			EdgeCostMultiple: c.num("gates.edge_cost_multiple", r.Gates.EdgeCostMultiple, 1, true, maxRatio, true),
+			InfraMonthlyUSD:  c.num("gates.infra_monthly_usd", r.Gates.InfraMonthlyUSD, 0, true, maxUSD, true),
 		}
 	}
 	c.crossChecks(r)

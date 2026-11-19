@@ -1,0 +1,65 @@
+# Local development: PostgreSQL 16 + traderd.
+#   docker compose up -d postgres
+#   docker compose run --rm migrate
+#   docker compose run --rm verify
+#   docker compose --profile observe up -d observe      (needs access to Binance)
+# The passwords below are for this local container only.
+name: trader
+
+x-traderd: &traderd
+  build: .
+  image: trader:local
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  volumes:
+    - ./deploy/local/config.yaml:/etc/trader/config.yaml:ro
+    - traderdata:/var/lib/trader
+  environment:
+    TRADER_STORE_DSN: postgres://trader_app:local-dev-only@postgres:5432/trader?sslmode=disable
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: trader_owner
+      POSTGRES_PASSWORD: local-dev-only
+      POSTGRES_DB: trader
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/local/initdb:/docker-entrypoint-initdb.d:ro
+    ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader_owner -d trader"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *traderd
+    command: ["store", "migrate", "-config", "/etc/trader/config.yaml"]
+    environment:
+      TRADER_STORE_MIGRATE_DSN: postgres://trader_owner:local-dev-only@postgres:5432/trader?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+    profiles: ["tools"]
+
+  verify:
+    <<: *traderd
+    command: ["store", "verify", "-config", "/etc/trader/config.yaml"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    profiles: ["tools"]
+
+  observe:
+    <<: *traderd
+    command: ["observe", "-config", "/etc/trader/config.yaml", "-symbols", "BTCUSDT,ETHUSDT,SOLUSDT",
+              "-duration", "168h", "-out-dir", "/var/lib/trader/observe"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    profiles: ["observe"]
+
+volumes:
+  pgdata: {}
+  traderdata: {}

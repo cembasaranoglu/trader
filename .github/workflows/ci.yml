@@ -11,7 +11,20 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    services:
+      postgres:
+        # Same major version as production (Lightsail managed PostgreSQL 16).
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      TRADER_TEST_PG: postgres://postgres:ci-only@localhost:5432/postgres?sslmode=disable
+      TRADER_REQUIRE_PG: "1"
     steps:
       # Actions are pinned to commit SHAs; the comment names the release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,25 +43,60 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
-      - name: modernc libc version matches the sqlite driver (ADR-006)
-        run: |
-          want="$(go mod graph | awk '$1 ~ /^modernc.org\/sqlite@/ && $2 ~ /^modernc.org\/libc@/ {split($2, a, "@"); print a[2]; exit}')"
-          have="$(go list -m -f '{{.Version}}' modernc.org/libc)"
-          echo "sqlite wants libc $want, module uses $have"
-          test -n "$want" && test "$want" = "$have"
       - name: vet
         run: go vet ./...
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
-      - name: test
+      - name: test (with PostgreSQL 16)
         run: go test -race ./...
       - name: build
         run: go build ./...
-      - name: validate example config
-        run: go run ./cmd/traderd -config configs/example.yaml
+      - name: validate configs
+        run: |
+          for c in configs/example.yaml deploy/local/config.yaml deploy/prod/config.yaml; do
+            go run ./cmd/traderd -config "$c"
+          done
       - name: schema is generated from the example
         run: |
           python3 -m pip install --user --quiet 'PyYAML==6.0.2'
           python3 scripts/gen_schema.py configs/example.yaml | diff -u configs/schema.json -
+      - name: shellcheck
+        run: shellcheck deploy/prod/deploy.sh
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build image
+        run: docker compose build migrate
+      - name: base image digests (for pinning)
+        run: |
+          for i in golang:1.26.11-bookworm gcr.io/distroless/static-debian12:nonroot postgres:16-alpine; do
+            docker pull --quiet "$i" >/dev/null
+            echo "$i -> $(docker image inspect --format '{{index .RepoDigests 0}}' "$i")"
+          done
+      - name: local stack (postgres, migrate, verify)
+        run: |
+          docker compose up -d --wait postgres
+          docker compose run --rm migrate
+          docker compose run --rm migrate
+          docker compose run --rm verify
+          docker compose run --rm --entrypoint /usr/local/bin/traderd verify version
+      - name: image runs as non-root with the production config
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' trader:local)" = "65532:65532"
+          docker run --rm trader:local -config /etc/trader/config.yaml
+          docker run --rm --entrypoint /usr/local/bin/traderd trader:local version
+      - name: production compose file is valid
+        run: TRADER_IMAGE=trader:local docker compose -f deploy/prod/compose.yaml config --quiet
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: tear down
+        if: always()
+        run: docker compose down -v

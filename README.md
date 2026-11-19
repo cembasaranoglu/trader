@@ -2,7 +2,7 @@
 
 LLM destekli, kripto spot piyasasında (binance.com, USDT pariteleri) çalışan bir işlem sistemi. LLM ajanları yalnızca şemalı öneri üretir. Emirlere deterministik Go çekirdeğindeki risk motoru karar verir.
 
-> **Durum:** W1a tamam; W1b (WebSocket piyasa verisi) ve W1c (depolama, ön kontrol) kodlandı, canlı doğrulama bekliyor. Konfigürasyon doğrulayıcı, binance.com salt okuma REST istemcisi (saat senkronu, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri), `venuecheck` tanı aracı ve WebSocket piyasa verisi (`traderd observe`) var. Hash zincirli olay günlüğü ve başlangıç ön kontrolü (`traderd preflight`) var. Emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz. Sıradaki işler: [docs/plan/01-waves.md](docs/plan/01-waves.md).
+> **Durum:** W1a, W1b (WebSocket piyasa verisi), W1c (ön kontrol) ve W1d (PostgreSQL olay deposu) kodlandı; W1e (Docker imajı, GitHub'dan VPS'e deploy) hazır, VPS kurulumu bekliyor. Canlı Binance doğrulaması bekliyor. Konfigürasyon doğrulayıcı, binance.com salt okuma REST istemcisi (saat senkronu, sembol kuralları, piyasa verisi, hesap bayrakları, API anahtarı yetkileri), `venuecheck` tanı aracı ve WebSocket piyasa verisi (`traderd observe`) var. PostgreSQL'de hash zincirli olay günlüğü, tek yürütücü kirası (fencing) ve başlangıç ön kontrolü (`traderd preflight`) var. Emir gönderme ve LLM katmanı **yok**. Sistem para ile işlem yapmaz. Sıradaki işler: [docs/plan/01-waves.md](docs/plan/01-waves.md).
 >
 > Bu yazılım yatırım tavsiyesi değildir. Kâr garantisi yoktur.
 
@@ -11,6 +11,8 @@ Tasarım ve dalga planı: [Plan dokümanı](https://claude.ai/artifact/7Rgd1jjuX
 ## Gereksinimler
 
 - Go 1.26 (`go.mod`; `toolchain go1.26.11`, eski bir Go kuruluysa `GOTOOLCHAIN=auto` ile otomatik indirilir)
+- PostgreSQL 16 ya da üstü (yerelde Docker Compose ile gelir)
+- Docker Engine / Docker Desktop (Compose v2) — yerel çalışma ve deploy için
 
 ## Kullanım
 
@@ -84,15 +86,17 @@ Dizüstünde koşarken uyku moduna geçmeyi engelleyin: macOS `caffeinate -i go 
 
 ## Başlangıç ön kontrolü ve depolama
 
-`traderd preflight` işlem süreci başlamadan önce şunları borsadan doğrular: saat farkı (R-20), API anahtarında çekim yetkisinin kapalı olması ve ek yetki bulunmaması (I-7), işlem yetkisi varsa IP kısıtının açık olması, seçilen STP modunun her sembolde izinli olması (R-22) ve olay günlüğünün hash zincirinin sağlam olması. Bir kontrol bile başarısızsa çıkış kodu 1'dir.
+`traderd preflight` işlem süreci başlamadan önce şunları doğrular: saat farkı (R-20), API anahtarında çekim yetkisinin kapalı olması ve ek yetki bulunmaması (I-7), işlem yetkisi varsa IP kısıtının açık olması, seçilen STP modunun her sembolde izinli olması (R-22) ve olay deposunun (şema, korumalar, hash zinciri, çapa) sağlam olması. Bir kontrol bile başarısızsa çıkış kodu 1'dir.
+
+Olay deposu PostgreSQL 16'dır (ADR-007). Bağlantı dizeleri dosyadan okunur (chmod 600); yerel Docker veritabanı için `TRADER_STORE_DSN` / `TRADER_STORE_MIGRATE_DSN` kullanılabilir.
 
 ```sh
+docker compose up -d --wait postgres && docker compose run --rm migrate && docker compose run --rm verify
 go run ./cmd/traderd preflight -config configs/example.yaml -credentials ~/.config/trader/binance.json -symbols BTCUSDT,ETHUSDT
-go run ./cmd/traderd store verify -config configs/example.yaml
-go run ./cmd/traderd store backup -config configs/example.yaml
+go run ./cmd/traderd store export -config configs/example.yaml
 ```
 
-Ayrıntılar ve geri yükleme adımları: [docs/runbook/storage.md](docs/runbook/storage.md).
+Ayrıntılar: [docs/runbook/storage.md](docs/runbook/storage.md). Docker, VPS kurulumu ve GitHub'dan deploy: [docs/runbook/deploy.md](docs/runbook/deploy.md).
 
 ## Konfigürasyon
 
@@ -109,9 +113,11 @@ gofmt -l .
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
-go test -race ./...
+docker compose up -d --wait postgres
+export TRADER_TEST_PG='postgres://trader_owner:local-dev-only@127.0.0.1:5432/trader?sslmode=disable'
+go test -race ./...           # TRADER_TEST_PG yoksa veritabanı testleri atlanır; CI'da zorunludur
 go build ./...
 python3 scripts/gen_schema.py configs/example.yaml > configs/schema.json   # config alanı değişince
 ```
 
-CI aynı adımları `.github/workflows/ci.yml` içinde çalıştırır.
+CI aynı adımları PostgreSQL 16 ile `.github/workflows/ci.yml` içinde çalıştırır; ayrıca imajı derler ve yerel Compose yığınını (migrate, verify) çalıştırır. `v*` etiketi `.github/workflows/release.yml` ile imajı yayınlar ve onaydan sonra VPS'e deploy eder.
