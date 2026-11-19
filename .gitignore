@@ -1,0 +1,33 @@
+# Build outputs
+/traderd
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local data and logs
+*.db
+*.db-wal
+*.db-shm
+*.log
+/data/
+
+# Secrets: never commit
+.env
+.env.*
+*.pem
+*.key
+secrets/
+*.age
+!deploy/secrets/*.sops.yaml
+
+# Python (research/)
+__pycache__/
+*.pyc
+.venv/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store

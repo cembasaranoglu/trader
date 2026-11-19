@@ -1,0 +1,421 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cembasaranoglu/trader/configs/schema.json",
+  "title": "trader configuration",
+  "description": "Editor-side schema. The Go loader (internal/config) is the enforcing validator and also checks cross-field rules that JSON Schema cannot express.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "mode",
+    "venue",
+    "quote_currency",
+    "capital",
+    "risk",
+    "execution",
+    "ops",
+    "llm",
+    "agents",
+    "learning",
+    "gates"
+  ],
+  "properties": {
+    "mode": {
+      "enum": [
+        "paper",
+        "live_small",
+        "live_full"
+      ]
+    },
+    "venue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary",
+        "secondary",
+        "secondary_enabled"
+      ],
+      "properties": {
+        "primary": {
+          "enum": [
+            "binance_tr"
+          ]
+        },
+        "secondary": {
+          "enum": [
+            "btcturk"
+          ]
+        },
+        "secondary_enabled": {
+          "type": "boolean",
+          "const": false,
+          "description": "BtcTurk adapter arrives in W9"
+        }
+      }
+    },
+    "quote_currency": {
+      "enum": [
+        "TRY"
+      ]
+    },
+    "capital": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planned_usd",
+        "live_small_max_usd"
+      ],
+      "properties": {
+        "planned_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "live_small_max_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_drawdown_pct",
+        "on_max_dd",
+        "max_daily_loss_pct",
+        "max_weekly_loss_pct",
+        "max_order_notional_usd",
+        "max_daily_turnover_pct",
+        "max_venue_exposure_pct",
+        "fx_shock_pct",
+        "per_trade_risk_pct",
+        "max_position_pct",
+        "max_gross_exposure_pct",
+        "price_collar_bps",
+        "max_data_age_ms",
+        "max_orders_per_min",
+        "max_entries_per_window",
+        "cash_reserve_pct",
+        "min_edge_to_cost_ratio",
+        "reconcile_tolerance_steps",
+        "reconcile_escalate_cycles"
+      ],
+      "properties": {
+        "max_drawdown_pct": {
+          "type": "number",
+          "minimum": 30,
+          "maximum": 100,
+          "description": "D-11"
+        },
+        "on_max_dd": {
+          "enum": [
+            "close_all",
+            "hold_stops"
+          ]
+        },
+        "max_daily_loss_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "max_weekly_loss_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "max_order_notional_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_daily_turnover_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_venue_exposure_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "fx_shock_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "per_trade_risk_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "max_position_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "max_gross_exposure_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "price_collar_bps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_data_age_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_orders_per_min": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_entries_per_window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "count",
+            "window"
+          ],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "window": {
+              "type": "string",
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "description": "Go duration, e.g. 60m"
+            }
+          }
+        },
+        "cash_reserve_pct": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 100
+        },
+        "min_edge_to_cost_ratio": {
+          "type": "number",
+          "minimum": 1
+        },
+        "reconcile_tolerance_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reconcile_escalate_cycles": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stp_mode"
+      ],
+      "properties": {
+        "stp_mode": {
+          "enum": [
+            "EXPIRE_TAKER",
+            "EXPIRE_MAKER",
+            "EXPIRE_BOTH"
+          ]
+        }
+      }
+    },
+    "ops": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_clock_skew_ms",
+        "heartbeat_timeout_s"
+      ],
+      "properties": {
+        "max_clock_skew_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "heartbeat_timeout_s": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cost_cap_pct_of_capital",
+        "rnd_monthly_cap_usd",
+        "models"
+      ],
+      "properties": {
+        "cost_cap_pct_of_capital": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "rnd_monthly_cap_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "routine",
+            "synthesis"
+          ],
+          "properties": {
+            "routine": {
+              "type": "string",
+              "minLength": 1
+            },
+            "synthesis": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "events",
+        "regime",
+        "thesis",
+        "critic",
+        "reflection"
+      ],
+      "properties": {
+        "events": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "max_calls_per_day"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "max_calls_per_day": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "regime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "max_calls_per_day"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "max_calls_per_day": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "thesis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "max_calls_per_day",
+            "max_escalations_per_day"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "max_calls_per_day": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_escalations_per_day": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "critic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "max_calls_per_day"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "max_calls_per_day": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "reflection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "learning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_supporting_trades",
+        "max_param_delta_pct"
+      ],
+      "properties": {
+        "min_supporting_trades": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_param_delta_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paper_min_days",
+        "g2_min_days",
+        "edge_cost_multiple"
+      ],
+      "properties": {
+        "paper_min_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "g2_min_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "edge_cost_multiple": {
+          "type": "number",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}
