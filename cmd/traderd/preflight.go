@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/cembasaranoglu/trader/internal/credentials"
 	"github.com/cembasaranoglu/trader/internal/exchange/binance"
+	"github.com/cembasaranoglu/trader/internal/exchange/httpx"
 	"github.com/cembasaranoglu/trader/internal/preflight"
 	"github.com/cembasaranoglu/trader/internal/store"
 )
@@ -57,11 +59,15 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	opts := binance.Options{BaseURL: *baseURL, MarketDataURL: *marketURL, Credentials: bc}
 	if *env == preflight.EnvDemo {
-		if opts.BaseURL == "" {
-			opts.BaseURL = demoURL
-		}
-		if opts.MarketDataURL == "" {
-			opts.MarketDataURL = demoURL
+		// The demo environment skips the /sapi permission check, so it must
+		// really talk to Demo Mode: only loopback test servers may override.
+		for _, u := range []*string{&opts.BaseURL, &opts.MarketDataURL} {
+			if *u == "" {
+				*u = demoURL
+			} else if !isLoopbackURL(*u) {
+				fmt.Fprintln(stderr, "preflight: -environment demo requires the Demo Mode host; URL overrides are allowed only for loopback test servers")
+				return 2
+			}
 		}
 	}
 	client, err := binance.New(opts)
@@ -92,6 +98,11 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	return 0
 }
 
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && httpx.IsLoopback(u.Hostname())
+}
+
 func clipLine(s string) string {
 	if len(s) > 400 {
 		return s[:400] + "…"
@@ -107,45 +118,52 @@ func runStore(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	sub := args[0]
 	flags := flag.NewFlagSet("store "+sub, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	path := flags.String("config", "", "path to the YAML configuration file (required)")
+	path := flags.String("config", "", "path to the YAML configuration file (required unless -file is given)")
+	file := flags.String("file", "", "verify: a database file such as a backup, instead of store.path; its .sha256 is checked when present")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
-	if *path == "" || flags.NArg() != 0 {
+	if flags.NArg() != 0 || (*path == "" && *file == "") || (sub == "backup" && (*path == "" || *file != "")) {
 		fmt.Fprintln(stderr, usage)
 		return 2
 	}
-	cfg, ok := loadConfig(*path, stderr)
-	if !ok {
-		return 1
+	target := *file
+	var cfgBackupDir string
+	if *path != "" {
+		cfg, ok := loadConfig(*path, stderr)
+		if !ok {
+			return 1
+		}
+		if target == "" {
+			target = cfg.Store.Path
+		}
+		cfgBackupDir = cfg.Store.BackupDir
 	}
-	if _, err := os.Stat(cfg.Store.Path); errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(stderr, "store: no database at %s\n", cfg.Store.Path)
+	if _, err := os.Stat(target); errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(stderr, "store: no database at %s\n", target)
 		return 1
 	}
 	switch sub {
 	case "verify":
-		if err := store.VerifyFile(ctx, cfg.Store.Path); err != nil {
+		// Check the checksum before anything opens the file.
+		if _, err := os.Stat(target + ".sha256"); err == nil {
+			if err := store.VerifyChecksum(target); err != nil {
+				fmt.Fprintln(stderr, "store verify:", err)
+				return 1
+			}
+		}
+		if err := store.VerifyFile(ctx, target); err != nil {
 			fmt.Fprintln(stderr, "store verify:", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "store ok: %s\n", cfg.Store.Path)
+		fmt.Fprintf(stdout, "store ok: %s\n", target)
 		return 0
 	default:
-		s, err := store.Open(ctx, cfg.Store.Path, store.Options{})
+		// Read-only: safe while traderd is writing; never migrates the source.
+		dst := filepath.Join(cfgBackupDir, "trader-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
+		sum, err := store.BackupFile(ctx, target, dst)
 		if err != nil {
 			fmt.Fprintln(stderr, "store backup:", err)
-			return 1
-		}
-		dst := filepath.Join(cfg.Store.BackupDir, "trader-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
-		sum, berr := s.Backup(ctx, dst)
-		cerr := s.Close()
-		if berr != nil {
-			fmt.Fprintln(stderr, "store backup:", berr)
-			return 1
-		}
-		if cerr != nil {
-			fmt.Fprintln(stderr, "store backup: close:", cerr)
 			return 1
 		}
 		fmt.Fprintf(stdout, "backup ok: %s sha256 %s\n", dst, sum)

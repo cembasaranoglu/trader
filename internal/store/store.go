@@ -9,13 +9,25 @@
 //   - Triggers reject UPDATE and DELETE on events and any INSERT whose seq is
 //     not max(seq)+1; recursive_triggers is on so INSERT OR REPLACE cannot
 //     delete rows silently.
+//   - Fills, approvals and the tax ledger have UPDATE/DELETE triggers and
+//     BEFORE INSERT guards against existing keys (INSERT OR REPLACE).
 //   - After each commit the chain tip (seq, hash) is written to an anchor
 //     file next to the database (atomic replace + fsync). Verify fails when
 //     the database ends before the anchor (truncation or an older copy) or
-//     the hash at the anchor's seq differs (rewrite). The anchor may lag the
-//     database by the events of a crash between commit and anchor write.
+//     the hash at the anchor's seq differs (rewrite). The anchor may lag by
+//     the events of a crash between commit and anchor write; Open refreshes
+//     it after verifying the chain.
+//   - Verify compares the SQL of every guard trigger and of the events table
+//     with the SQL the migrations create, and checks applied migration
+//     checksums, so a neutered trigger under the same name is detected.
 //
-// There is one writer connection; the process is the only writer.
+// Threat model: this detects accidents (truncation, restoring the wrong or
+// an older copy, edits by tools that bypass the store) and corruption. It
+// does not stop a malicious user who can write both the database and the
+// anchor file; off-host copies of backups and anchors (W7) are the defence
+// against that.
+//
+// One process writes: Open takes an exclusive lock file (path + ".lock").
 package store
 
 import (
@@ -61,13 +73,19 @@ var (
 	ErrInvalidEvent  = errors.New("store: invalid event")
 	ErrClosed        = errors.New("store: closed")
 	ErrSchema        = errors.New("store: schema integrity check failed")
+	// ErrAnchorNotUpdated: the events were committed but the anchor file
+	// could not be written. The data is durable; the anchor lags.
+	ErrAnchorNotUpdated = errors.New("store: events committed but anchor not updated")
 )
 
-// guardTriggers must exist in every database; Verify fails without them.
-var guardTriggers = []string{
+// guardObjects are the schema objects whose SQL must match the migrations
+// exactly: the events table and every guard trigger.
+var guardObjects = []string{
+	"events",
 	"events_append_contiguous", "events_no_update", "events_no_delete",
-	"fills_no_update", "fills_no_delete", "approvals_no_update", "approvals_no_delete",
-	"tax_ledger_no_update", "tax_ledger_no_delete",
+	"fills_no_update", "fills_no_delete", "fills_no_replace",
+	"approvals_no_update", "approvals_no_delete", "approvals_no_replace",
+	"tax_ledger_no_update", "tax_ledger_no_delete", "tax_ledger_no_replace",
 }
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -93,6 +111,7 @@ type Store struct {
 	tipSeq int64
 	tip    [hashLen]byte
 	closed bool
+	lock   *os.File
 }
 
 // Options configures Open.
@@ -120,10 +139,23 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("store: create directory: %w", err)
 	}
+	lock, err := lockFile(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	removeStaleTemps(filepath.Dir(path))
 	db, err := sql.Open("sqlite", dsn(path, false))
 	if err != nil {
+		lock.Close()
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
+	ok := false
+	defer func() {
+		if !ok {
+			db.Close()
+			lock.Close()
+		}
+	}()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
@@ -131,7 +163,7 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Store{path: path, anchor: path + ".anchor", db: db, now: now}
+	s := &Store{path: path, anchor: path + ".anchor", db: db, now: now, lock: lock}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -152,15 +184,24 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if s.tipSeq == 0 {
-		if _, err := os.Stat(s.anchor); errors.Is(err, fs.ErrNotExist) {
-			if err := writeAnchor(s.anchor, 0, [hashLen]byte{}); err != nil {
-				db.Close()
-				return nil, err
-			}
+	// Create the anchor for a new database, or bring a lagging one (crash
+	// between commit and anchor write) up to the verified tip.
+	if aSeq, _, err := readAnchor(s.anchor); errors.Is(err, fs.ErrNotExist) || (err == nil && aSeq < s.tipSeq) {
+		if err := writeAnchor(s.anchor, s.tipSeq, s.tip); err != nil {
+			return nil, err
 		}
 	}
+	ok = true
 	return s, nil
+}
+
+// removeStaleTemps deletes anchor temp files left by a crash during
+// writeAnchor.
+func removeStaleTemps(dir string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, ".anchor-*"))
+	for _, m := range matches {
+		os.Remove(m)
+	}
 }
 
 func dsn(path string, readOnly bool) string {
@@ -186,7 +227,11 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
-	return s.db.Close()
+	err := s.db.Close()
+	if s.lock != nil {
+		s.lock.Close()
+	}
+	return err
 }
 
 // Path returns the database path.
@@ -378,18 +423,26 @@ func (s *Store) Update(ctx context.Context, fn func(*Tx) error) ([]Event, error)
 	if err != nil {
 		return nil, fmt.Errorf("store: begin: %w", err)
 	}
+	committed := false
+	// Roll back on any exit without commit, including a panic in fn, so the
+	// single connection is never left inside a transaction.
+	defer func() {
+		if !committed {
+			sqlTx.Rollback()
+		}
+	}()
 	tx := &Tx{tx: sqlTx, s: s, tipSeq: s.tipSeq, tip: s.tip}
 	if err := fn(tx); err != nil {
-		sqlTx.Rollback()
 		return nil, err
 	}
 	if err := sqlTx.Commit(); err != nil {
 		return nil, fmt.Errorf("store: commit: %w", err)
 	}
+	committed = true
 	s.tipSeq, s.tip = tx.tipSeq, tx.tip
 	if len(tx.pending) > 0 {
 		if err := writeAnchor(s.anchor, s.tipSeq, s.tip); err != nil {
-			return tx.pending, fmt.Errorf("store: events committed but anchor not updated: %w", err)
+			return tx.pending, fmt.Errorf("%w: %v", ErrAnchorNotUpdated, err)
 		}
 	}
 	return tx.pending, nil
@@ -409,14 +462,17 @@ func (s *Store) Append(ctx context.Context, kind string, payload any) (Event, er
 	return ev, err
 }
 
-// Verify re-hashes the whole chain and checks it against the anchor file.
+// Verify checks the schema, re-hashes the whole chain and compares it with
+// the anchor. It reads through a separate read-only connection and does not
+// block writes.
 func (s *Store) Verify(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
 		return ErrClosed
 	}
-	return s.verifyAnchor(ctx, s.db, s.anchor)
+	return VerifyFile(ctx, s.path)
 }
 
 // VerifyFile verifies a database file and its anchor without modifying them
@@ -432,6 +488,9 @@ func VerifyFile(ctx context.Context, path string) error {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	if err := checkMigrations(ctx, db); err != nil {
+		return err
+	}
 	return (&Store{}).verifyAnchor(ctx, db, path+".anchor")
 }
 
@@ -439,10 +498,10 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// verifyAnchor checks the guard triggers, reads the anchor, walks the whole
-// chain and compares them. Memory use is constant.
+// verifyAnchor checks the guard objects' SQL, reads the anchor, walks the
+// whole chain and compares them. Memory use is constant.
 func (s *Store) verifyAnchor(ctx context.Context, db querier, anchorPath string) error {
-	if err := checkTriggers(ctx, db); err != nil {
+	if err := checkGuards(ctx, db); err != nil {
 		return err
 	}
 	aSeq, aHash, aerr := readAnchor(anchorPath)
@@ -469,26 +528,144 @@ func (s *Store) verifyAnchor(ctx context.Context, db querier, anchorPath string)
 	return nil
 }
 
-func checkTriggers(ctx context.Context, db querier) error {
-	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'trigger'`)
+// migrationFiles returns the embedded migrations in order with their SHA-256.
+func migrationFiles() ([]string, [][]byte, []string, error) {
+	entries, err := fs.ReadDir(migrationFS, "migrations")
 	if err != nil {
-		return fmt.Errorf("store: read triggers: %w", err)
+		return nil, nil, nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	bodies := make([][]byte, len(names))
+	sums := make([]string, len(names))
+	for i, n := range names {
+		b, err := migrationFS.ReadFile("migrations/" + n)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		sum := sha256.Sum256(b)
+		bodies[i], sums[i] = b, hex.EncodeToString(sum[:])
+	}
+	return names, bodies, sums, nil
+}
+
+// checkMigrations requires the applied migrations to be a prefix of the
+// embedded ones with identical checksums.
+func checkMigrations(ctx context.Context, db querier) error {
+	_, _, sums, err := migrationFiles()
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT version, sha256 FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		return fmt.Errorf("%w: read schema_migrations: %v", ErrSchema, err)
 	}
 	defer rows.Close()
-	have := map[string]bool{}
+	var want int64 = 1
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return fmt.Errorf("store: read triggers: %w", err)
+		var v int64
+		var sum string
+		if err := rows.Scan(&v, &sum); err != nil {
+			return fmt.Errorf("%w: read schema_migrations: %v", ErrSchema, err)
 		}
-		have[n] = true
+		if v != want {
+			return fmt.Errorf("%w: migration versions not contiguous at %d", ErrSchema, v)
+		}
+		if v > int64(len(sums)) {
+			return fmt.Errorf("%w: database schema version %d is newer than this binary (%d)", ErrSchema, v, len(sums))
+		}
+		if sums[v-1] != sum {
+			return fmt.Errorf("%w: migration %d was changed after it was applied", ErrSchema, v)
+		}
+		want++
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("store: read triggers: %w", err)
+		return fmt.Errorf("%w: read schema_migrations: %v", ErrSchema, err)
 	}
-	for _, n := range guardTriggers {
-		if !have[n] {
-			return fmt.Errorf("%w: guard trigger %s is missing", ErrSchema, n)
+	if want == 1 {
+		return fmt.Errorf("%w: no migrations applied", ErrSchema)
+	}
+	return nil
+}
+
+type schemaObject struct{ table, sql string }
+
+var (
+	expectedOnce   sync.Once
+	expectedSchema map[string]schemaObject
+	expectedErr    error
+)
+
+// expected builds the guard objects' SQL by applying the embedded
+// migrations to an in-memory database.
+func expected() (map[string]schemaObject, error) {
+	expectedOnce.Do(func() {
+		db, err := sql.Open("sqlite", "file::memory:?_pragma=foreign_keys(ON)")
+		if err != nil {
+			expectedErr = err
+			return
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(1)
+		_, bodies, _, err := migrationFiles()
+		if err != nil {
+			expectedErr = err
+			return
+		}
+		for _, b := range bodies {
+			if _, err := db.Exec(string(b)); err != nil {
+				expectedErr = err
+				return
+			}
+		}
+		expectedSchema, expectedErr = readSchema(context.Background(), db)
+	})
+	return expectedSchema, expectedErr
+}
+
+func readSchema(ctx context.Context, db querier) (map[string]schemaObject, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'trigger')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]schemaObject{}
+	for rows.Next() {
+		var name, table string
+		var q sql.NullString
+		if err := rows.Scan(&name, &table, &q); err != nil {
+			return nil, err
+		}
+		out[name] = schemaObject{table: table, sql: q.String}
+	}
+	return out, rows.Err()
+}
+
+// checkGuards compares the SQL of the events table and of every guard
+// trigger with what the migrations create.
+func checkGuards(ctx context.Context, db querier) error {
+	want, err := expected()
+	if err != nil {
+		return fmt.Errorf("store: build expected schema: %w", err)
+	}
+	have, err := readSchema(ctx, db)
+	if err != nil {
+		return fmt.Errorf("%w: read schema: %v", ErrSchema, err)
+	}
+	for _, name := range guardObjects {
+		w, ok := want[name]
+		if !ok {
+			return fmt.Errorf("%w: %s not defined by the migrations", ErrSchema, name)
+		}
+		h, ok := have[name]
+		if !ok {
+			return fmt.Errorf("%w: %s is missing", ErrSchema, name)
+		}
+		if h != w {
+			return fmt.Errorf("%w: %s differs from its migration", ErrSchema, name)
 		}
 	}
 	return nil
@@ -600,41 +777,145 @@ func readAnchor(path string) (int64, [hashLen]byte, error) {
 	return seq, h, nil
 }
 
-// Backup writes a consistent copy of the database to dst (which must not
-// exist) with VACUUM INTO, writes its anchor (dst + ".anchor") and SHA-256
-// (dst + ".sha256"), and verifies the copy. Writes are blocked meanwhile.
+// Backup writes a consistent copy of the database to dst through the
+// store's own connection (writes wait meanwhile). See backupFrom.
 func (s *Store) Backup(ctx context.Context, dst string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return "", ErrClosed
 	}
-	if _, err := os.Stat(dst); err == nil {
-		return "", fmt.Errorf("store: backup target %s already exists", dst)
+	return backupFrom(ctx, s.db, s.anchor, dst)
+}
+
+// BackupFile backs up the database at src through a read-only connection:
+// it never migrates or writes the source, so it is safe while another
+// process (traderd) is writing.
+func BackupFile(ctx context.Context, src, dst string) (string, error) {
+	if _, err := os.Stat(src); err != nil {
+		return "", fmt.Errorf("store: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-		return "", fmt.Errorf("store: backup directory: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
-		return "", fmt.Errorf("store: VACUUM INTO: %w", err)
-	}
-	if err := os.Chmod(dst, 0o600); err != nil {
-		return "", fmt.Errorf("store: backup chmod: %w", err)
-	}
-	if err := writeAnchor(dst+".anchor", s.tipSeq, s.tip); err != nil {
-		return "", err
-	}
-	sum, err := fileSHA256(dst)
+	enableOFD()
+	db, err := sql.Open("sqlite", dsn(src, true))
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(dst+".sha256", []byte(sum+"  "+filepath.Base(dst)+"\n"), 0o600); err != nil {
-		return "", fmt.Errorf("store: write checksum: %w", err)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if err := checkMigrations(ctx, db); err != nil {
+		return "", err
+	}
+	return backupFrom(ctx, db, src+".anchor", dst)
+}
+
+type execQuerier interface {
+	querier
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// backupFrom copies the database with VACUUM INTO into dst, which must not
+// exist (it is created first with mode 0600 and O_EXCL). The backup's anchor
+// is written from the backup's own verified chain, and the source anchor
+// (read before the copy) must match the backup at its seq. dst + ".anchor"
+// and dst + ".sha256" are written; on any error every partial file is removed.
+func backupFrom(ctx context.Context, src execQuerier, srcAnchor, dst string) (sum string, err error) {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return "", fmt.Errorf("store: backup directory: %w", err)
+	}
+	aSeq, aHash, aerr := readAnchor(srcAnchor)
+	if aerr != nil && !errors.Is(aerr, fs.ErrNotExist) {
+		return "", aerr
+	}
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("store: backup target: %w", err)
+	}
+	f.Close()
+	defer func() {
+		if err != nil {
+			for _, p := range []string{dst, dst + ".anchor", dst + ".sha256"} {
+				os.Remove(p)
+			}
+		}
+	}()
+	if _, err := src.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
+		return "", fmt.Errorf("store: VACUUM INTO: %w", err)
+	}
+	bdb, err := sql.Open("sqlite", dsn(dst, true))
+	if err != nil {
+		return "", err
+	}
+	bdb.SetMaxOpenConns(1)
+	tipSeq, atAnchor, werr := walkChain(ctx, bdb, aSeq)
+	var tip [hashLen]byte
+	if werr == nil && tipSeq > 0 {
+		_, tip, werr = walkChain(ctx, bdb, tipSeq)
+	}
+	bdb.Close()
+	if werr != nil {
+		return "", fmt.Errorf("store: backup chain: %w", werr)
+	}
+	if aerr == nil {
+		if aSeq > tipSeq {
+			return "", fmt.Errorf("%w: source anchor seq %d, backup ends at %d", ErrAnchorAhead, aSeq, tipSeq)
+		}
+		if atAnchor != aHash {
+			return "", fmt.Errorf("%w: backup differs from the source anchor at seq %d", ErrChainBroken, aSeq)
+		}
+	}
+	if err := writeAnchor(dst+".anchor", tipSeq, tip); err != nil {
+		return "", err
+	}
+	sum, err = fileSHA256(dst)
+	if err != nil {
+		return "", err
+	}
+	if err := writeFileSync(dst+".sha256", []byte(sum+"  "+filepath.Base(dst)+"\n")); err != nil {
+		return "", err
+	}
+	if err := syncDir(filepath.Dir(dst)); err != nil {
+		return "", err
 	}
 	if err := VerifyFile(ctx, dst); err != nil {
 		return "", fmt.Errorf("store: backup verification failed: %w", err)
 	}
 	return sum, nil
+}
+
+// VerifyChecksum compares path's SHA-256 with path + ".sha256".
+func VerifyChecksum(path string) error {
+	b, err := os.ReadFile(path + ".sha256")
+	if err != nil {
+		return fmt.Errorf("store: checksum file: %w", err)
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) < 1 || len(fields[0]) != 64 {
+		return fmt.Errorf("store: malformed checksum file")
+	}
+	sum, err := fileSHA256(path)
+	if err != nil {
+		return err
+	}
+	if sum != fields[0] {
+		return fmt.Errorf("%w: SHA-256 of %s does not match its .sha256 file", ErrChainBroken, filepath.Base(path))
+	}
+	return nil
+}
+
+func writeFileSync(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("store: write %s: %w", filepath.Base(path), err)
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return fmt.Errorf("store: write %s: %w", filepath.Base(path), err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("store: sync %s: %w", filepath.Base(path), err)
+	}
+	return f.Close()
 }
 
 func fileSHA256(path string) (string, error) {

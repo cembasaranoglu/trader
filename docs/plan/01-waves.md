@@ -82,8 +82,8 @@ Bir dalga, kendi satırındaki "decision needed" maddeleri kapanmadan başlamaz.
 | # | Ne | Dalga | Öneri (recommendation) | Durum |
 | --- | --- | --- | --- | --- |
 | U-1 | `venuecheck` / `observe` / `preflight` / `demo-check` komutlarını kendi makinende ya da VPS'te çalıştırıp çıktıyı paylaşmak | Her dalga | — | sürekli eylem |
-| U-2 | WebSocket bağımlılığı. Standart kütüphanede WS istemcisi yok | W1b | `github.com/coder/websocket` v1.8.15 (bağımlılıksız, `go 1.23`, context destekli; fact: proxy.golang.org) | **decision needed** |
-| U-3 | SQLite sürücüsü | W1c | `modernc.org/sqlite` v1.62.0 (saf Go, cgo yok; `modernc.org/libc` v1.80.1 birebir sabitlenir; `MODERNC_SQLITE_OFD_LOCK=1`). Alternatif `mattn/go-sqlite3` v1.14.53 (cgo + gcc) | **decision needed** |
+| U-2 | WebSocket bağımlılığı. Standart kütüphanede WS istemcisi yok | W1b | `github.com/coder/websocket` v1.8.15 (bağımlılıksız, `go 1.23`, context destekli; fact: proxy.golang.org) | **decision (2026-11-19): onaylandı** |
+| U-3 | SQLite sürücüsü | W1c | `modernc.org/sqlite` v1.62.0 (saf Go, cgo yok; `modernc.org/libc` v1.80.1 birebir sabitlenir; OFD kilitleri koddan açılır). Alternatif `mattn/go-sqlite3` v1.14.53 (cgo + gcc) | **decision (2026-11-19): onaylandı** (ADR-006) |
 | U-4 | VPS sağlayıcısı ve bölgesi. Binance'in kısıtladığı bir konum olmamalı (ABD IP'leri 451, ÖLÇÜM-2; tam ülke listesi API dokümanında yok) | W2c | Bölge seçilince `venuecheck` VPS'te çalıştırılır | **decision needed** |
 | U-5 | İlk kripto evren izin listesi (D-1, D-4). API varlık sınıfını ayırt etmiyor | W2b başı (W2a'nın `traderd universe` çıktısıyla) | Aday listeyi W2a üretir | **decision needed** |
 | U-6 | İki ayrı Demo Mode API anahtarı (demo.binance.com): biri traderd, biri kill switch için. Demo'nun hangi anahtar tiplerini desteklediği unknown; Ed25519 denenir, olmazsa HMAC | W2b | — | eylem |
@@ -191,8 +191,8 @@ Bu kurallar doğrulayıcı incelemesindeki yüksek önemli bulgulardan çıktı.
 | 9 | Eklenecek | `internal/store/{store.go,migrations/0001_init.sql,store_test.go}`, `internal/preflight/*`, `internal/credentials/*` (venuecheck'ten taşındı), `cmd/traderd/preflight.go`, `docs/adr/006-sqlite-driver.md`, `docs/runbook/storage.md` |
 | 10 | Değişecek | `go.mod`, `cmd/traderd`, config (`store.path`, `store.backup_dir`), şema, README; CI: libc sürüm eşleşme kontrolü (modernc seçilirse) |
 | 11 | Dokunulmayacak | `internal/exchange/*` sözleşmeleri |
-| 12 | Çalışma yüzeyi | `traderd preflight -config <f> -credentials <f>`, `traderd store verify -db <f>`, `traderd store backup -db <f> -out <f>` |
-| 13 | Sözleşmeler | Olay kind enum + payload sürümü `v`; kanonik JSON |
+| 12 | Çalışma yüzeyi | `traderd preflight -config <f> -credentials <f> -symbols A,B [-environment live\|demo]`, `traderd store verify -config <f> \| -file <db>`, `traderd store backup -config <f>` (salt okuma; çalışan süreçle güvenli) |
+| 13 | Sözleşmeler | Olay `kind` (`^[a-z][a-z0-9_]{0,63}$`) + payload sürümü `v` (zorunlu tam sayı ≥ 1); saklanan baytlar hash'lenen baytlardır (kanonik JSON gerekmez: doğrulama baytları yeniden hash'ler); preflight her ret nedeni için tipli hata döner (`ErrClockSkew`, `ErrWithdrawalsEnabled`, ...) ve tüm kontrolleri çalıştırıp raporlar |
 | 14 | Config/doküman | `store.path`, `store.backup_dir` |
 | 15 | Testler | Migration ileri/çift; trigger reddi; zincir kurcalama (payload, sıra, silme); alt süreç `SIGKILL` sonrası tutarlılık; yedeğin açılıp doğrulanması; `intents` UNIQUE ihlali; preflight: her ret nedeni ayrı tipli hata |
 | 16 | Doğrulama | Ortak komutlar + `CGO_ENABLED=0 go build ./...` (modernc ise) |
@@ -398,7 +398,7 @@ Bu kurallar doğrulayıcı incelemesindeki yüksek önemli bulgulardan çıktı.
 | --- | --- | --- |
 | 1 | Amaç | Canlı paraya operasyonel hazırlığı kanıtlamak |
 | 2 | Kaynak | D-14, D-16 (`gates.paper_min_days` = 60) |
-| 3 | Kapsam | 60 gün kesintisiz paper; VPS sertleştirme (otomatik güvenlik güncellemesi, yalnız anahtarla SSH, ufw, ayrı servis kullanıcıları); sırların `systemd-creds` ile şifrelenmesi; günlük şifreli yedek (`age`, U-20) VPS dışına — veritabanı, kill switch olay dosyası, politika paketleri, hafıza snapshot'ları, config — + geri yükleme tatbikatı (sonra her çeyrek); VPS dışı heartbeat izleyici (U-10); `traderd drill` alt komutu: canlı anahtarla (U-11) en küçük geçerli giriş → OCO → `killswitch.target: live` ile başlatılan kill switch örneğinden `close_all`; sabit tutar tavanı (U-22), etkileşimli onay, yalnız bu komut `mode: paper` dışında emir gönderebilir; simülatör maliyet modelinin canlı defter ölçümüyle karşılaştırılması; G1 raporu (`research` + Go) |
+| 3 | Kapsam | 60 gün kesintisiz paper; VPS sertleştirme (otomatik güvenlik güncellemesi, yalnız anahtarla SSH, ufw, ayrı servis kullanıcıları); sırların `systemd-creds` ile şifrelenmesi; günlük şifreli yedek (`age`, U-20) VPS dışına — veritabanı ve `.anchor` çapası (ayrıca her çapa güncellemesinde uç hash'i VPS dışı bir hedefe kopyalanır; yerel kötü niyetli yazıcıya karşı tek savunma budur, bkz. `docs/runbook/storage.md` tehdit modeli), kill switch olay dosyası, politika paketleri, hafıza snapshot'ları, config — + geri yükleme tatbikatı (sonra her çeyrek); VPS dışı heartbeat izleyici (U-10); `traderd drill` alt komutu: canlı anahtarla (U-11) en küçük geçerli giriş → OCO → `killswitch.target: live` ile başlatılan kill switch örneğinden `close_all`; sabit tutar tavanı (U-22), etkileşimli onay, yalnız bu komut `mode: paper` dışında emir gönderebilir; simülatör maliyet modelinin canlı defter ölçümüyle karşılaştırılması; G1 raporu (`research` + Go) |
 | 4 | Kapsam dışı | Tatbikat dışında gerçek emir |
 | 5 | Ön koşul | W6; U-10, U-11, U-22 (U-17 W2c'de kayıtlı) |
 | 6 | Varsayımlar | Yok |

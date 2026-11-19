@@ -50,13 +50,30 @@ func (e *FieldError) Error() string {
 func (e *FieldError) Unwrap() error { return e.Err }
 
 // LoadFile reads and validates the configuration file at path.
+//
+// Relative store paths are resolved against the directory of the config
+// file, not the process working directory (which is "/" under systemd by
+// default), so the same file always names the same database.
 func LoadFile(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("config: open: %w", err)
 	}
 	defer f.Close()
-	return Load(f)
+	cfg, err := Load(f)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("config: resolve directory: %w", err)
+	}
+	for _, p := range []*string{&cfg.Store.Path, &cfg.Store.BackupDir} {
+		if !filepath.IsAbs(*p) {
+			*p = filepath.Join(dir, *p)
+		}
+	}
+	return cfg, nil
 }
 
 // quotedValue matches the backtick-quoted values that yaml.v3 puts into type
@@ -304,9 +321,12 @@ func (c *checker) build(r *rawConfig) *Config {
 			Path:      c.filePath("store.path", r.Store.Path),
 			BackupDir: c.filePath("store.backup_dir", r.Store.BackupDir),
 		}
-		if cfg.Store.Path != "" && cfg.Store.BackupDir != "" &&
-			filepath.Clean(filepath.Dir(cfg.Store.Path)) == filepath.Clean(cfg.Store.BackupDir) {
-			c.invalid("store.backup_dir", "must differ from the database directory")
+		if cfg.Store.Path != "" && cfg.Store.BackupDir != "" {
+			db, _ := filepath.Abs(cfg.Store.Path)
+			bk, _ := filepath.Abs(cfg.Store.BackupDir)
+			if bk == filepath.Dir(db) || bk == db || strings.HasPrefix(db, bk+string(filepath.Separator)) {
+				c.invalid("store.backup_dir", "must not contain or equal the database or its directory")
+			}
 		}
 	}
 	if present(c, "llm", r.LLM) {

@@ -108,6 +108,18 @@ CREATE TABLE tax_ledger (
 ) STRICT;
 
 -- Fills, approvals and the tax ledger are records of fact: never changed.
+-- The BEFORE INSERT guards reject an existing key before conflict
+-- resolution, so INSERT OR REPLACE cannot rewrite a row even on a
+-- connection where recursive_triggers is off.
+CREATE TRIGGER fills_no_replace BEFORE INSERT ON fills
+WHEN EXISTS (SELECT 1 FROM fills WHERE symbol = NEW.symbol AND trade_id = NEW.trade_id)
+BEGIN SELECT RAISE(ABORT, 'fills: immutable'); END;
+CREATE TRIGGER approvals_no_replace BEFORE INSERT ON approvals
+WHEN EXISTS (SELECT 1 FROM approvals WHERE seq = NEW.seq)
+BEGIN SELECT RAISE(ABORT, 'approvals: immutable'); END;
+CREATE TRIGGER tax_ledger_no_replace BEFORE INSERT ON tax_ledger
+WHEN EXISTS (SELECT 1 FROM tax_ledger WHERE symbol = NEW.symbol AND trade_id = NEW.trade_id)
+BEGIN SELECT RAISE(ABORT, 'tax_ledger: immutable'); END;
 CREATE TRIGGER fills_no_update BEFORE UPDATE ON fills BEGIN SELECT RAISE(ABORT, 'fills: immutable'); END;
 CREATE TRIGGER fills_no_delete BEFORE DELETE ON fills BEGIN SELECT RAISE(ABORT, 'fills: immutable'); END;
 CREATE TRIGGER approvals_no_update BEFORE UPDATE ON approvals BEGIN SELECT RAISE(ABORT, 'approvals: immutable'); END;

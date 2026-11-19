@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -124,6 +125,16 @@ func TestChainAndEvents(t *testing.T) {
 	}
 }
 
+// TestChainHashVector pins the encoding: changing it would make existing
+// databases unverifiable. Verified independently with Python hashlib.
+func TestChainHashVector(t *testing.T) {
+	t.Parallel()
+	got := chainHash([32]byte{}, 1, 1795132800000000000, "order_submitted", []byte(`{"v":1,"x":"a"}`))
+	if fmt.Sprintf("%x", got) != "9153f1baafde391830fd04ddea1e79145fb522f18fb587bc54a9061cc7cdf5c5" {
+		t.Fatalf("hash encoding changed: %x", got)
+	}
+}
+
 func TestChainHashFieldBoundaries(t *testing.T) {
 	t.Parallel()
 	// Length prefixes keep ("ab", "c") and ("a", "bc") apart.
@@ -132,6 +143,260 @@ func TestChainHashFieldBoundaries(t *testing.T) {
 	}
 	if chainHash([32]byte{}, 1, 2, "a", nil) == chainHash([32]byte{}, 2, 1, "a", nil) {
 		t.Fatal("seq/ts swap collision")
+	}
+}
+
+// Replacing record rows must fail even where recursive_triggers is off
+// (sqlite3 CLI default).
+func TestRecordTablesRejectReplace(t *testing.T) {
+	t.Parallel()
+	s, path := openTemp(t)
+	seedRecords(t, s)
+	s.Close()
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=recursive_triggers(OFF)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`INSERT OR REPLACE INTO fills VALUES ('BTCUSDT', 7, 'c', 'BUY', '90000.01', '999', '0', 'BTC', 0, 1, 1)`,
+		`REPLACE INTO approvals VALUES (1, 'restart', 'kill', 'mallory', x'01', 0)`,
+		`INSERT OR REPLACE INTO tax_ledger (symbol, trade_id, trade_time_ms, side, qty, price, commission, commission_asset) VALUES ('BTCUSDT', 7, 1, 'BUY', '999', '1', '0', 'BTC')`,
+	} {
+		if _, err := db.Exec(q); err == nil || !strings.Contains(err.Error(), "immutable") {
+			t.Errorf("%s: want immutable error, got %v", q, err)
+		}
+	}
+	if err := VerifyFile(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedRecords(t *testing.T, s *Store) {
+	t.Helper()
+	_, err := s.Update(ctx, func(tx *Tx) error {
+		ev, err := tx.Append(ctx, "fill", map[string]int{"v": 1})
+		if err != nil {
+			return err
+		}
+		for _, q := range []string{
+			`INSERT INTO intents (intent_id, created_seq, policy_version, symbol, side, qty, state, updated_ns) VALUES ('i', ?1, 'v0', 'BTCUSDT', 'BUY', '1', 'X', 0)`,
+			`INSERT INTO orders (client_order_id, intent_id, symbol, side, type, qty, state, created_seq, updated_ns) VALUES ('c', 'i', 'BTCUSDT', 'BUY', 'LIMIT', '1', 'FILLED', ?1, 0)`,
+			`INSERT INTO fills VALUES ('BTCUSDT', 7, 'c', 'BUY', '90000.01', '0.001', '0.000001', 'BTC', 0, 1, ?1)`,
+			`INSERT INTO approvals VALUES (?1, 'restart', 'kill', 'cem', x'01', 0)`,
+			`INSERT INTO tax_ledger (symbol, trade_id, trade_time_ms, side, qty, price, commission, commission_asset) VALUES ('BTCUSDT', 7, 1, 'BUY', '0.001', '90000.01', '0.000001', 'BTC')`,
+		} {
+			if _, err := tx.Exec(ctx, q, ev.Seq); err != nil {
+				return fmt.Errorf("%s: %w", q, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A guard trigger recreated under the same name but neutered, or moved to
+// another table, is detected.
+func TestNeuteredTriggerDetected(t *testing.T) {
+	t.Parallel()
+	for name, qs := range map[string][]string{
+		"same name, WHEN 0": {`DROP TRIGGER events_no_delete`,
+			`CREATE TRIGGER events_no_delete BEFORE DELETE ON events WHEN 0 BEGIN SELECT RAISE(ABORT, 'events: append-only'); END`},
+		"other table": {`DROP TRIGGER events_no_update`,
+			`CREATE TRIGGER events_no_update BEFORE UPDATE ON intents BEGIN SELECT RAISE(ABORT, 'events: append-only'); END`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s, path := openTemp(t)
+			appendN(t, s, 2)
+			s.Close()
+			db := raw(t, path)
+			for _, q := range qs {
+				if _, err := db.Exec(q); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db.Close()
+			if err := VerifyFile(ctx, path); !errors.Is(err, ErrSchema) {
+				t.Fatalf("VerifyFile: want ErrSchema, got %v", err)
+			}
+			if _, err := Open(ctx, path, Options{}); !errors.Is(err, ErrSchema) {
+				t.Fatalf("Open: want ErrSchema, got %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyFileChecksMigrations(t *testing.T) {
+	t.Parallel()
+	for name, q := range map[string]string{
+		"changed checksum": `UPDATE schema_migrations SET sha256 = 'x' WHERE version = 1`,
+		"newer version":    `INSERT INTO schema_migrations VALUES (2, '0002_future.sql', 'x', 0)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s, path := openTemp(t)
+			appendN(t, s, 1)
+			s.Close()
+			if _, err := raw(t, path).Exec(q); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyFile(ctx, path); !errors.Is(err, ErrSchema) {
+				t.Fatalf("want ErrSchema, got %v", err)
+			}
+		})
+	}
+}
+
+// After a crash left the anchor behind, Open brings it up to the tip, so a
+// later truncation of those events is detected.
+func TestOpenRefreshesLaggingAnchor(t *testing.T) {
+	t.Parallel()
+	s, path := openTemp(t)
+	appendN(t, s, 2)
+	old, _ := os.ReadFile(path + ".anchor")
+	appendN(t, s, 3)
+	s.Close()
+	os.WriteFile(path+".anchor", old, 0o600)
+	s2, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.Close()
+	if b, _ := os.ReadFile(path + ".anchor"); !strings.HasPrefix(string(b), "v1 5 ") {
+		t.Fatalf("anchor not refreshed: %q", b)
+	}
+	tamper(t, path, `DELETE FROM events WHERE seq >= 3`)
+	if err := VerifyFile(ctx, path); !errors.Is(err, ErrAnchorAhead) {
+		t.Fatalf("truncation after refresh: want ErrAnchorAhead, got %v", err)
+	}
+}
+
+func TestPanicInUpdateDoesNotWedgeStore(t *testing.T) {
+	t.Parallel()
+	s, _ := openTemp(t)
+	func() {
+		defer func() { recover() }()
+		s.Update(ctx, func(tx *Tx) error {
+			tx.Append(ctx, "a", map[string]int{"v": 1})
+			panic("boom")
+		})
+	}()
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if _, err := s.Append(cctx, "a", map[string]int{"v": 1}); err != nil {
+		t.Fatalf("store wedged after a panic: %v", err)
+	}
+	if seq, _ := s.Tip(); seq != 1 {
+		t.Fatalf("tip %d", seq)
+	}
+}
+
+func TestSecondWriterRefused(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("advisory locks are Unix-only")
+	}
+	_, path := openTemp(t)
+	if _, err := Open(ctx, path, Options{}); !errors.Is(err, ErrLocked) {
+		t.Fatalf("want ErrLocked, got %v", err)
+	}
+}
+
+func TestStaleAnchorTempsRemoved(t *testing.T) {
+	t.Parallel()
+	s, path := openTemp(t)
+	s.Close()
+	stray := filepath.Join(filepath.Dir(path), ".anchor-12345")
+	os.WriteFile(stray, []byte("x"), 0o600)
+	s2, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.Close()
+	if _, err := os.Stat(stray); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stray anchor temp file not removed")
+	}
+}
+
+func TestBackupFileWhileWriting(t *testing.T) {
+	t.Parallel()
+	s, path := openTemp(t)
+	appendN(t, s, 5)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := s.Append(ctx, "w", map[string]int{"v": 1, "i": i}); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	dst := filepath.Join(filepath.Dir(path), "bk", "hot.db")
+	if _, err := BackupFile(ctx, path, dst); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+	wg.Wait()
+	// Check the checksum first: opening a database for writing changes it.
+	if err := VerifyChecksum(dst); err != nil {
+		t.Fatal(err)
+	}
+	// The backup's anchor is its own tip: no unanchored tail.
+	b, _ := os.ReadFile(dst + ".anchor")
+	bs, err := Open(ctx, dst, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq, _ := bs.Tip()
+	bs.Close()
+	if !strings.HasPrefix(string(b), fmt.Sprintf("v1 %d ", seq)) {
+		t.Fatalf("backup anchor %q, backup tip %d", b, seq)
+	}
+}
+
+func TestBackupFailureLeavesNoFiles(t *testing.T) {
+	t.Parallel()
+	s, path := openTemp(t)
+	appendN(t, s, 3)
+	s.Close()
+	// A source anchor that does not match the data makes the backup fail.
+	os.WriteFile(path+".anchor", []byte("v1 2 "+strings.Repeat("ab", 32)+"\n"), 0o600)
+	dst := filepath.Join(filepath.Dir(path), "bk", "bad.db")
+	if _, err := BackupFile(ctx, path, dst); !errors.Is(err, ErrChainBroken) {
+		t.Fatalf("want ErrChainBroken, got %v", err)
+	}
+	for _, p := range []string{dst, dst + ".anchor", dst + ".sha256"} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s left behind", filepath.Base(p))
+		}
+	}
+}
+
+func TestVerifyChecksumDetectsCorruption(t *testing.T) {
+	t.Parallel()
+	s, path := openTemp(t)
+	appendN(t, s, 2)
+	dst := filepath.Join(filepath.Dir(path), "bk", "c.db")
+	if _, err := s.Backup(ctx, dst); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.OpenFile(dst, os.O_WRONLY|os.O_APPEND, 0)
+	f.Write([]byte("x"))
+	f.Close()
+	if err := VerifyChecksum(dst); !errors.Is(err, ErrChainBroken) {
+		t.Fatalf("want checksum mismatch, got %v", err)
 	}
 }
 
@@ -183,32 +448,14 @@ func TestFilePermissions(t *testing.T) {
 func TestImmutableRecordTables(t *testing.T) {
 	t.Parallel()
 	s, path := openTemp(t)
-	_, err := s.Update(ctx, func(tx *Tx) error {
-		ev, err := tx.Append(ctx, "fill", map[string]int{"v": 1})
-		if err != nil {
-			return err
-		}
-		for _, q := range []string{
-			`INSERT INTO intents (intent_id, created_seq, policy_version, symbol, side, qty, state, updated_ns) VALUES ('i', ?1, 'v0', 'BTCUSDT', 'BUY', '1', 'X', 0)`,
-			`INSERT INTO orders (client_order_id, intent_id, symbol, side, type, qty, state, created_seq, updated_ns) VALUES ('c', 'i', 'BTCUSDT', 'BUY', 'LIMIT', '1', 'FILLED', ?1, 0)`,
-			`INSERT INTO fills VALUES ('BTCUSDT', 7, 'c', 'BUY', '90000.01', '0.001', '0.000001', 'BTC', 0, 1, ?1)`,
-			`INSERT INTO approvals VALUES (?1, 'restart', 'kill', 'cem', x'01', 0)`,
-		} {
-			if _, err := tx.Exec(ctx, q, ev.Seq); err != nil {
-				return fmt.Errorf("%s: %w", q, err)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	seedRecords(t, s)
 	s.Close()
 	db := raw(t, path)
 	for _, q := range []string{
 		`UPDATE fills SET qty = '1' WHERE trade_id = 7`, `DELETE FROM fills`,
 		`UPDATE approvals SET signer = 'x'`, `DELETE FROM approvals`,
-		`INSERT INTO tax_ledger (symbol, trade_id, trade_time_ms, side, qty, price, commission, commission_asset, usd_try_rate) VALUES ('BTCUSDT', 7, 1, 'BUY', '1', '1', '0', 'BTC', '42.1')`,
+		`UPDATE tax_ledger SET qty = '1'`, `DELETE FROM tax_ledger`,
+		`INSERT INTO tax_ledger (symbol, trade_id, trade_time_ms, side, qty, price, commission, commission_asset, usd_try_rate) VALUES ('BTCUSDT', 8, 1, 'BUY', '1', '1', '0', 'BTC', '42.1')`,
 	} {
 		if _, err := db.Exec(q); err == nil {
 			t.Errorf("%s: succeeded", q)
@@ -236,17 +483,19 @@ func TestTriggersBlockMutation(t *testing.T) {
 	appendN(t, s, 3)
 	db := raw(t, path)
 	db.Exec(`PRAGMA recursive_triggers = ON`)
-	for name, q := range map[string]string{
-		"update":            `UPDATE events SET kind = 'x' WHERE seq = 2`,
-		"delete":            `DELETE FROM events WHERE seq = 3`,
-		"insert gap":        `INSERT INTO events VALUES (10, 1, 'k', '{}', zeroblob(32), zeroblob(32))`,
-		"insert past":       `INSERT INTO events VALUES (2, 1, 'k', '{}', zeroblob(32), zeroblob(32))`,
-		"insert or replace": `INSERT OR REPLACE INTO events VALUES (2, 1, 'k', '{}', zeroblob(32), zeroblob(32))`,
-		"replace into":      `REPLACE INTO events VALUES (3, 1, 'k', '{}', zeroblob(32), zeroblob(32))`,
-		"short hash":        `INSERT INTO events VALUES (4, 1, 'k', '{}', zeroblob(32), zeroblob(31))`,
+	// x'7b7d' is "{}" as a BLOB, so only the trigger or CHECK can reject these.
+	for name, tc := range map[string]struct{ q, msg string }{
+		"update":            {`UPDATE events SET kind = 'x' WHERE seq = 2`, "events: append-only"},
+		"delete":            {`DELETE FROM events WHERE seq = 3`, "events: append-only"},
+		"insert gap":        {`INSERT INTO events VALUES (10, 1, 'k', x'7b7d', zeroblob(32), zeroblob(32))`, "seq must be max(seq)+1"},
+		"insert past":       {`INSERT INTO events VALUES (2, 1, 'k', x'7b7d', zeroblob(32), zeroblob(32))`, "seq must be max(seq)+1"},
+		"insert or replace": {`INSERT OR REPLACE INTO events VALUES (2, 1, 'k', x'7b7d', zeroblob(32), zeroblob(32))`, "seq must be max(seq)+1"},
+		"replace into":      {`REPLACE INTO events VALUES (3, 1, 'k', x'7b7d', zeroblob(32), zeroblob(32))`, "seq must be max(seq)+1"},
+		"short hash":        {`INSERT INTO events VALUES (4, 1, 'k', x'7b7d', zeroblob(32), zeroblob(31))`, "CHECK constraint failed"},
 	} {
-		if _, err := db.Exec(q); err == nil {
-			t.Errorf("%s: statement succeeded", name)
+		_, err := db.Exec(tc.q)
+		if err == nil || !strings.Contains(err.Error(), tc.msg) {
+			t.Errorf("%s: want error containing %q, got %v", name, tc.msg, err)
 		}
 	}
 	if err := s.Verify(ctx); err != nil {
@@ -565,7 +814,8 @@ func TestClosedStore(t *testing.T) {
 }
 
 // TestCrashConsistency kills a child process (SIGKILL) while it appends and
-// checks that the database reopens with a valid chain.
+// checks that the database reopens with a valid chain, keeps every event the
+// child reported as committed, and passes SQLite's integrity check.
 func TestCrashConsistency(t *testing.T) {
 	if os.Getenv("STORE_CRASH_CHILD") != "" {
 		s, err := Open(ctx, os.Getenv("STORE_CRASH_CHILD"), Options{})
@@ -573,9 +823,11 @@ func TestCrashConsistency(t *testing.T) {
 			os.Exit(3)
 		}
 		for i := 0; ; i++ {
-			if _, err := s.Append(ctx, "crash", map[string]int{"v": 1, "i": i}); err != nil {
+			ev, err := s.Append(ctx, "crash", map[string]int{"v": 1, "i": i})
+			if err != nil {
 				os.Exit(4)
 			}
+			fmt.Println(ev.Seq) // committed
 		}
 	}
 	t.Parallel()
@@ -583,21 +835,64 @@ func TestCrashConsistency(t *testing.T) {
 	for round := 0; round < 3; round++ {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestCrashConsistency$")
 		cmd.Env = append(os.Environ(), "STORE_CRASH_CHILD="+path)
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(time.Duration(150+round*100) * time.Millisecond)
+		var last int64
+		var mu sync.Mutex
+		done := make(chan struct{})
+		first := make(chan struct{})
+		go func() {
+			defer close(done)
+			var once sync.Once
+			sc := bufio.NewScanner(out)
+			for sc.Scan() {
+				if n, err := strconv.ParseInt(sc.Text(), 10, 64); err == nil {
+					mu.Lock()
+					last = n
+					mu.Unlock()
+					once.Do(func() { close(first) })
+				}
+			}
+		}()
+		// Kill only after the child has committed at least once, then let it
+		// keep appending so the kill lands in the middle of a write.
+		select {
+		case <-first:
+		case <-done:
+		case <-time.After(30 * time.Second):
+		}
+		time.Sleep(time.Duration(20+round*40) * time.Millisecond)
 		cmd.Process.Signal(syscall.SIGKILL)
-		cmd.Wait()
+		<-done
+		err = cmd.Wait()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ProcessState.ExitCode() != -1 {
+			t.Fatalf("round %d: child must be killed by the signal, got %v", round, err)
+		}
 		s, err := Open(ctx, path, Options{})
 		if err != nil {
 			t.Fatalf("round %d: reopen after SIGKILL: %v", round, err)
 		}
 		seq, _ := s.Tip()
-		s.Close()
-		if seq == 0 && round == 2 {
-			t.Fatal("child never appended; test did not exercise a crash")
+		var integrity string
+		if err := s.db.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
+			t.Fatalf("round %d: integrity_check %q %v", round, integrity, err)
 		}
-		t.Logf("round %d: tip %s", round, strconv.FormatInt(seq, 10))
+		s.Close()
+		mu.Lock()
+		reported := last
+		mu.Unlock()
+		if seq < reported {
+			t.Fatalf("round %d: committed event %d lost (tip %d)", round, reported, seq)
+		}
+		if reported == 0 {
+			t.Fatalf("round %d: child never committed; the crash was not exercised", round)
+		}
+		t.Logf("round %d: child reported %d, tip %d", round, reported, seq)
 	}
 }

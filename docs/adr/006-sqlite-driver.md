@@ -13,7 +13,8 @@ ADR-002 SQLite'ı (WAL) seçti, sürücüyü sonraya bıraktı. İki aday var: `
 
 - cgo ve C derleyicisi gerekmez; `CGO_ENABLED=0` ile tek dosya ikili üretilir ve VPS'e kopyalanır.
 - `modernc.org/libc` sürümü sürücünün `go.mod`'undakiyle birebir aynı olmalı (v1.80.1). Sürücünün kendi dokümanı bu bağımlılığı "kırılgan" diye niteliyor; CI eşleşmeyi kontrol eder.
-- Linux'ta OFD kilitleri (`sqlite.OFDLocking(true)`) ilk bağlantıdan önce koddan açılır. Böylece süreçteki ilgisiz bir `os.File` kapanışı SQLite'ın kilitlerini düşüremez.
+- Linux'ta OFD kilitleri (`sqlite.OFDLocking(true)`) ilk bağlantıdan önce koddan açılır. Böylece süreçteki ilgisiz bir `os.File` kapanışı veritabanı dosyasındaki işlem kilitlerini düşüremez. Sürücü dokümanına göre (`ofd.go`) `-shm` dosyasının kilitleri POSIX kalır.
+- Tek yazıcı kuralı ayrıca bir kilit dosyasıyla (`<db>.lock`, `flock`) zorlanır; ikinci bir yazıcı süreç `Open`'da reddedilir.
 
 ## Değerlendirilen alternatif
 

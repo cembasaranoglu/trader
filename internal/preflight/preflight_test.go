@@ -93,25 +93,30 @@ func TestRefusals(t *testing.T) {
 	cases := map[string]struct {
 		mut  func(*fakeEx, *Params)
 		fail string
+		want error
 	}{
-		"withdrawals enabled":       {func(e *fakeEx, _ *Params) { e.perm.Withdrawals = true }, "key_permissions"},
-		"extra permission":          {func(e *fakeEx, _ *Params) { e.perm.OtherEnabled = []string{"enableMargin"} }, "key_permissions"},
-		"unknown true permission":   {func(e *fakeEx, _ *Params) { e.perm.OtherEnabled = []string{"newShinyPermission"} }, "key_permissions"},
-		"trading without IP limit":  {func(e *fakeEx, _ *Params) { e.perm.IPRestricted = false }, "key_permissions"},
-		"reading disabled":          {func(e *fakeEx, _ *Params) { e.perm.Reading = false }, "key_permissions"},
-		"permission call fails":     {func(e *fakeEx, _ *Params) { e.permErr = errors.New("malformed response") }, "key_permissions"},
-		"clock offset too large":    {func(e *fakeEx, _ *Params) { e.offset = 600 * time.Millisecond }, "clock"},
-		"negative offset too large": {func(e *fakeEx, _ *Params) { e.offset = -600 * time.Millisecond }, "clock"},
-		"slow round trip":           {func(e *fakeEx, _ *Params) { e.offset = 300 * time.Millisecond; e.rtt = 500 * time.Millisecond }, "clock"},
-		"server time fails":         {func(e *fakeEx, _ *Params) { e.syncErr = errors.New("clock skew too large") }, "clock"},
-		"stp not allowed":           {func(e *fakeEx, p *Params) { p.STPMode = "EXPIRE_MAKER" }, "symbols_stp"},
-		"symbol missing":            {func(e *fakeEx, p *Params) { p.Symbols = append(p.Symbols, "SOLUSDT") }, "symbols_stp"},
-		"symbol halted":             {func(e *fakeEx, _ *Params) { e.syms[1].SpotEnabled = false; e.syms[1].Status = "HALT" }, "symbols_stp"},
-		"exchangeInfo fails":        {func(e *fakeEx, _ *Params) { e.symErr = errors.New("418") }, "symbols_stp"},
+		"withdrawals enabled":       {func(e *fakeEx, _ *Params) { e.perm.Withdrawals = true }, "key_permissions", ErrWithdrawalsEnabled},
+		"extra permission":          {func(e *fakeEx, _ *Params) { e.perm.OtherEnabled = []string{"enableMargin"} }, "key_permissions", ErrExtraPermissions},
+		"unknown true permission":   {func(e *fakeEx, _ *Params) { e.perm.OtherEnabled = []string{"newShinyPermission"} }, "key_permissions", ErrExtraPermissions},
+		"trading without IP limit":  {func(e *fakeEx, _ *Params) { e.perm.IPRestricted = false }, "key_permissions", ErrNoIPRestriction},
+		"reading disabled":          {func(e *fakeEx, _ *Params) { e.perm.Reading = false }, "key_permissions", ErrReadingDisabled},
+		"permission call fails":     {func(e *fakeEx, _ *Params) { e.permErr = errors.New("malformed response") }, "key_permissions", ErrPermissions},
+		"clock offset too large":    {func(e *fakeEx, _ *Params) { e.offset = 600 * time.Millisecond }, "clock", ErrClockSkew},
+		"negative offset too large": {func(e *fakeEx, _ *Params) { e.offset = -600 * time.Millisecond }, "clock", ErrClockSkew},
+		"slow round trip":           {func(e *fakeEx, _ *Params) { e.offset = 300 * time.Millisecond; e.rtt = 500 * time.Millisecond }, "clock", ErrClockSkew},
+		"server time fails":         {func(e *fakeEx, _ *Params) { e.syncErr = errors.New("clock skew too large") }, "clock", ErrServerTime},
+		"stp not allowed":           {func(e *fakeEx, p *Params) { p.STPMode = "EXPIRE_MAKER" }, "symbols_stp", ErrSTPNotAllowed},
+		"symbol missing":            {func(e *fakeEx, p *Params) { p.Symbols = append(p.Symbols, "SOLUSDT") }, "symbols_stp", ErrSymbolMissing},
+		"empty STP list":            {func(e *fakeEx, _ *Params) { e.syms[0].STPAllowed = nil }, "symbols_stp", ErrSTPNotAllowed},
+		"symbol halted":             {func(e *fakeEx, _ *Params) { e.syms[1].SpotEnabled = false; e.syms[1].Status = "HALT" }, "symbols_stp", ErrSymbolNotTrading},
+		"exchangeInfo fails":        {func(e *fakeEx, _ *Params) { e.symErr = errors.New("418") }, "symbols_stp", ErrExchangeInfo},
 		"chain broken": {func(e *fakeEx, p *Params) {
 			os.WriteFile(p.StorePath, []byte("x"), 0o600)
 			p.VerifyChain = func(context.Context, string) error { return errors.New("hash chain broken") }
-		}, "event_log"},
+		}, "event_log", ErrEventLog},
+		"anchor without database": {func(e *fakeEx, p *Params) {
+			os.WriteFile(p.StorePath+".anchor", []byte("v1 5 x"), 0o600)
+		}, "event_log", ErrDatabaseMissing},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -125,6 +130,9 @@ func TestRefusals(t *testing.T) {
 			}
 			if f := failed(rep); len(f) != 1 || f[0] != tc.fail {
 				t.Fatalf("failed checks %v, want [%s]", f, tc.fail)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error %v does not wrap %v", err, tc.want)
 			}
 			if len(rep.Checks) != 4 {
 				t.Fatal("every check must run and be reported")

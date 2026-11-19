@@ -27,8 +27,26 @@ import (
 	"github.com/cembasaranoglu/trader/internal/exchange"
 )
 
-// ErrRefused is returned when at least one check failed.
+// ErrRefused is returned when at least one check failed; the returned error
+// also wraps the specific reasons below (errors.Is works for each).
 var ErrRefused = errors.New("preflight: refused")
+
+// Refusal reasons.
+var (
+	ErrClockSkew          = errors.New("preflight: clock skew above the limit")
+	ErrServerTime         = errors.New("preflight: server time unavailable")
+	ErrPermissions        = errors.New("preflight: API key permissions unavailable")
+	ErrWithdrawalsEnabled = errors.New("preflight: API key has withdrawals enabled")
+	ErrReadingDisabled    = errors.New("preflight: API key cannot read")
+	ErrNoIPRestriction    = errors.New("preflight: API key can trade without an IP restriction")
+	ErrExtraPermissions   = errors.New("preflight: API key has extra permissions")
+	ErrExchangeInfo       = errors.New("preflight: exchangeInfo unavailable")
+	ErrSymbolMissing      = errors.New("preflight: symbol not found")
+	ErrSTPNotAllowed      = errors.New("preflight: STP mode not allowed for a symbol")
+	ErrSymbolNotTrading   = errors.New("preflight: symbol not trading")
+	ErrEventLog           = errors.New("preflight: event log invalid")
+	ErrDatabaseMissing    = errors.New("preflight: database missing while its anchor exists")
+)
 
 // Environments.
 const (
@@ -64,6 +82,7 @@ type Check struct {
 	OK      bool   `json:"ok"`
 	Skipped bool   `json:"skipped,omitempty"`
 	Detail  string `json:"detail"`
+	Err     error  `json:"-"` // joined refusal reasons when the check failed
 }
 
 // Report lists every check in order.
@@ -107,12 +126,14 @@ func Run(ctx context.Context, p Params) (Report, error) {
 	add(checkChain(ctx, p))
 	if !rep.OK {
 		var failed []string
+		errs := []error{ErrRefused}
 		for _, c := range rep.Checks {
 			if !c.OK && !c.Skipped {
 				failed = append(failed, c.Name)
+				errs = append(errs, c.Err)
 			}
 		}
-		return rep, fmt.Errorf("%w: %s", ErrRefused, strings.Join(failed, ", "))
+		return rep, fmt.Errorf("%w (%s)", errors.Join(errs...), strings.Join(failed, ", "))
 	}
 	return rep, nil
 }
@@ -124,6 +145,7 @@ func checkClock(ctx context.Context, p Params, now func() time.Time) Check {
 	rtt := now().Sub(start)
 	if err != nil {
 		c.Detail = "server time: " + err.Error()
+		c.Err = fmt.Errorf("%w: %v", ErrServerTime, err)
 		return c
 	}
 	abs := off
@@ -133,6 +155,9 @@ func checkClock(ctx context.Context, p Params, now func() time.Time) Check {
 	bound := abs + rtt/2
 	c.Detail = fmt.Sprintf("offset %s, round trip %s, worst case %s, limit %s", off, rtt, bound, p.MaxClockSkew)
 	c.OK = bound <= p.MaxClockSkew
+	if !c.OK {
+		c.Err = ErrClockSkew
+	}
 	return c
 }
 
@@ -141,23 +166,30 @@ func checkPermissions(ctx context.Context, ex Exchange) Check {
 	perm, err := ex.KeyPermissions(ctx)
 	if err != nil {
 		c.Detail = "read permissions: " + err.Error()
+		c.Err = fmt.Errorf("%w: %v", ErrPermissions, err)
 		return c
 	}
 	var problems []string
+	var errs []error
 	if perm.Withdrawals {
 		problems = append(problems, "withdrawals are enabled (I-7)")
+		errs = append(errs, ErrWithdrawalsEnabled)
 	}
 	if !perm.Reading {
 		problems = append(problems, "reading is disabled")
+		errs = append(errs, ErrReadingDisabled)
 	}
 	if perm.SpotTrading && !perm.IPRestricted {
 		problems = append(problems, "spot trading is enabled without an IP restriction")
+		errs = append(errs, ErrNoIPRestriction)
 	}
 	if len(perm.OtherEnabled) > 0 {
 		problems = append(problems, "extra permissions enabled: "+strings.Join(perm.OtherEnabled, ","))
+		errs = append(errs, ErrExtraPermissions)
 	}
 	if len(problems) > 0 {
 		c.Detail = strings.Join(problems, "; ")
+		c.Err = errors.Join(errs...)
 		return c
 	}
 	c.OK = true
@@ -170,6 +202,7 @@ func checkSymbols(ctx context.Context, p Params) Check {
 	syms, err := p.Exchange.Symbols(ctx, p.Symbols...)
 	if err != nil {
 		c.Detail = "exchangeInfo: " + err.Error()
+		c.Err = fmt.Errorf("%w: %v", ErrExchangeInfo, err)
 		return c
 	}
 	byName := map[string]exchange.Symbol{}
@@ -177,19 +210,24 @@ func checkSymbols(ctx context.Context, p Params) Check {
 		byName[s.Name] = s
 	}
 	var problems []string
+	var errs []error
 	for _, name := range p.Symbols {
 		s, ok := byName[name]
 		switch {
 		case !ok:
 			problems = append(problems, name+": not found")
+			errs = append(errs, fmt.Errorf("%w: %s", ErrSymbolMissing, name))
 		case !slices.Contains(s.STPAllowed, p.STPMode):
 			problems = append(problems, fmt.Sprintf("%s: STP mode %s not allowed (allowed %v)", name, p.STPMode, s.STPAllowed))
+			errs = append(errs, fmt.Errorf("%w: %s", ErrSTPNotAllowed, name))
 		case !s.SpotEnabled:
 			problems = append(problems, fmt.Sprintf("%s: spot trading not enabled (status %s)", name, s.Status))
+			errs = append(errs, fmt.Errorf("%w: %s", ErrSymbolNotTrading, name))
 		}
 	}
 	if len(problems) > 0 {
 		c.Detail = strings.Join(problems, "; ")
+		c.Err = errors.Join(errs...)
 		return c
 	}
 	c.OK = true
@@ -200,15 +238,26 @@ func checkSymbols(ctx context.Context, p Params) Check {
 func checkChain(ctx context.Context, p Params) Check {
 	c := Check{Name: "event_log"}
 	if _, err := os.Stat(p.StorePath); errors.Is(err, fs.ErrNotExist) {
+		// An anchor or WAL file without its database means the database was
+		// deleted or the configured path is wrong: do not start on an empty log.
+		for _, side := range []string{".anchor", "-wal"} {
+			if _, err := os.Stat(p.StorePath + side); err == nil {
+				c.Detail = fmt.Sprintf("%s exists but the database %s does not", p.StorePath+side, p.StorePath)
+				c.Err = ErrDatabaseMissing
+				return c
+			}
+		}
 		c.OK = true
 		c.Detail = "no database yet; it is created on first start"
 		return c
 	} else if err != nil {
 		c.Detail = err.Error()
+		c.Err = fmt.Errorf("%w: %v", ErrEventLog, err)
 		return c
 	}
 	if err := p.VerifyChain(ctx, p.StorePath); err != nil {
 		c.Detail = err.Error()
+		c.Err = fmt.Errorf("%w: %v", ErrEventLog, err)
 		return c
 	}
 	c.OK = true

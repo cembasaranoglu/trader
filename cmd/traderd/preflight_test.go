@@ -101,6 +101,11 @@ func TestPreflightCommand(t *testing.T) {
 	if code := run(context.Background(), []string{"preflight", "-config", cfg, "-credentials", creds, "-symbols", "BTCUSDT", "-environment", "staging"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("unknown environment must be a usage error, got %d", code)
 	}
+	// Demo skips the permission check, so it must not be pointed at the live host.
+	if code := run(context.Background(), []string{"preflight", "-config", cfg, "-credentials", creds, "-symbols", "BTCUSDT",
+		"-environment", "demo", "-base-url", "https://api.binance.com"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("demo with a live host must be refused, got %d", code)
+	}
 }
 
 func TestStoreCommands(t *testing.T) {
@@ -136,7 +141,21 @@ func TestStoreCommands(t *testing.T) {
 	if err := store.VerifyFile(context.Background(), matches[0]); err != nil {
 		t.Fatal(err)
 	}
+	stdout.Reset()
+	if code := run(context.Background(), []string{"store", "verify", "-file", matches[0]}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "store ok") {
+		t.Fatalf("verify -file backup: exit %d %s %s", code, stdout.String(), stderr.String())
+	}
+	f, _ := os.OpenFile(matches[0], os.O_WRONLY|os.O_APPEND, 0)
+	f.Write([]byte("x"))
+	f.Close()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"store", "verify", "-file", matches[0]}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "sha256") && !strings.Contains(stderr.String(), "SHA-256") {
+		t.Fatalf("corrupted backup must fail verification: exit %d %s", code, stderr.String())
+	}
 	if code := run(context.Background(), []string{"store", "compact", "-config", cfg}, &stdout, &stderr); code != 2 {
 		t.Fatal("unknown store subcommand must be a usage error")
+	}
+	if code := run(context.Background(), []string{"store", "backup", "-file", matches[0]}, &stdout, &stderr); code != 2 {
+		t.Fatal("backup needs -config")
 	}
 }

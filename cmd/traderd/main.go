@@ -7,7 +7,8 @@
 //	                                           stream market data and report its health
 //	traderd preflight -config <file> -credentials <file> -symbols A,B [-environment live|demo]
 //	                                           run the start-up safety checks
-//	traderd store verify|backup -config <file>  verify or back up the event log
+//	traderd store verify -config <file> | -file <db>  verify the event log (or a backup)
+//	traderd store backup -config <file>                back up the event log (read-only, safe while running)
 //
 // The trading runtime is added wave by wave (docs/plan/01-waves.md).
 // Exit codes: 0 success, 1 failure (invalid configuration, setup error),
@@ -38,7 +39,8 @@ const usage = `usage:
   traderd [validate] -config <file>
   traderd observe -config <file> -symbols A,B [-duration 24h] [-out file]
   traderd preflight -config <file> -credentials <file> -symbols A,B [-environment live|demo]
-  traderd store verify|backup -config <file>`
+  traderd store verify -config <file> | -file <db>
+  traderd store backup -config <file>`
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	cmd := "validate"

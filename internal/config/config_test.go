@@ -103,8 +103,8 @@ func TestLoadFileExample(t *testing.T) {
 		{"depth_limit", cfg.MarketData.DepthLimit, 1000},
 		{"intervals", strings.Join(cfg.MarketData.KlineIntervals, ","), "1m,1h,4h,1d"},
 		{"reconnect_backoff", cfg.MarketData.ReconnectMaxBackoff, 60 * time.Second},
-		{"store_path", cfg.Store.Path, "data/trader.db"},
-		{"backup_dir", cfg.Store.BackupDir, "data/backups"},
+		{"store_path", cfg.Store.Path, mustAbs(t, "../../configs/data/trader.db")},
+		{"backup_dir", cfg.Store.BackupDir, mustAbs(t, "../../configs/data/backups")},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -185,6 +185,8 @@ func TestLoadRejects(t *testing.T) {
 		{"missing store", func(t *testing.T, m map[string]any) { del(t, m, "store") }, config.ErrMissing, "store"},
 		{"blank store path", func(t *testing.T, m map[string]any) { set(t, m, "store.path", " ") }, config.ErrInvalid, "store.path"},
 		{"backup dir equals db dir", func(t *testing.T, m map[string]any) { set(t, m, "store.backup_dir", "data/") }, config.ErrInvalid, "store.backup_dir"},
+		{"backup dir equals db file", func(t *testing.T, m map[string]any) { set(t, m, "store.backup_dir", "data/trader.db") }, config.ErrInvalid, "store.backup_dir"},
+		{"backup dir contains db", func(t *testing.T, m map[string]any) { set(t, m, "store.backup_dir", ".") }, config.ErrInvalid, "store.backup_dir"},
 		{"gross plus reserve above 100", func(t *testing.T, m map[string]any) { set(t, m, "risk.cash_reserve_pct", 25) }, config.ErrInvalid, "risk.max_gross_exposure_pct"},
 	}
 	for _, tc := range tests {
@@ -321,5 +323,30 @@ func TestLoadDecodeErrorRedactsValues(t *testing.T) {
 		if strings.Contains(err.Error(), "SECRET") {
 			t.Fatalf("decode error leaks the value: %v", err)
 		}
+	}
+}
+
+func mustAbs(t *testing.T, p string) string {
+	t.Helper()
+	a, err := filepath.Abs(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func TestLoadFileResolvesRelativeStorePaths(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(p, readExample(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Store.Path != filepath.Join(dir, "data", "trader.db") || cfg.Store.BackupDir != filepath.Join(dir, "data", "backups") {
+		t.Fatalf("paths not resolved against the config directory: %+v", cfg.Store)
 	}
 }
